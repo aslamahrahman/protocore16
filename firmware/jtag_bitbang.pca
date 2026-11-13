@@ -1,0 +1,19 @@
+; ProtoCore16 JTAG bit-bang (IEEE 1149.1)
+; Pins: TCK=sideset, TMS=out_base bit, TDI=set_base, TDO=in_base
+; FIFO byte encodes {TMS, TDI} in bits [1:0]; shifts one TAP cycle per bit pair.
+; Host sequences TMS for IR/DR state machine; this SM is the cycle engine.
+
+.sideset 1
+
+start:
+    pull      block
+    set       x, 7               ; up to 8 cycles per byte (4 bits TMS/TDI pairs packed differently)
+    ; Simpler API: each FIFO byte = one cycle: bit0=TDI, bit1=TMS
+cycle:
+    out       pins, 2   side 0   ; present TMS+TDI (if out_base maps 2 pins) while TCK low
+    nop                 side 1   ; TCK rise — TAP samples TMS/TDI; TDO updates
+    in        pins, 1   side 1   ; sample TDO
+    nop                 side 0
+    ; only one cycle per pull in this minimal version
+    push      block
+    jmp       start

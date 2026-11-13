@@ -1,0 +1,15 @@
+; ProtoCore16 SPI master Mode 0 — uses SIDE opcode for SCLK (no delay-field sideset)
+; out_base=MOSI(0), in_base=MISO(2), side_base=SCLK(1), side_count=1
+; shift_right=0 for MSB first
+
+start:
+    pull      block
+    set       x, 7
+bitloop:
+    out       pins, 1            ; MOSI setup while clock low
+    side      1                  ; SCLK high
+    in        pins, 1            ; sample MISO
+    side      0                  ; SCLK low
+    jmp       x--, bitloop
+    push      block
+    jmp       start

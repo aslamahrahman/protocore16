@@ -1,0 +1,47 @@
+; ProtoCore16 I2C target (address match in firmware)
+; Waits for START, clocks in address, compares to Y (host preloads Y via SET/MOV),
+; ACKs, then receives one data byte to RX FIFO.
+
+.sideset 1
+
+start:
+    ; wait START: SDA falls while SCL high — approximate: wait SDA low then check SCL
+    wait      0, pin, 0          ; SDA low (in_base=SDA)
+    ; assume START; read 8 bits
+    set       x, 7
+abit:
+    wait      0, pin, 1          ; wait SCL low (need dual-pin wait — use irq/fifo hack)
+    ; Simplified single-pin clock stretch style: host ties WAIT idx carefully.
+    ; Here: WAIT pin uses jmp_pin for SCL via WAIT src=JMPPIN
+    wait      1, jmppin, 0
+    in        pins, 1
+    wait      0, jmppin, 0
+    jmp       x--, abit
+    mov       x, isr             ; address+rw in X low bits — MOV X, ISR
+    ; compare with Y (configured address<<1)
+    jmp       x!=y, nack
+    ; ACK
+    set       pindirs, 1
+    set       pins, 0
+    wait      1, jmppin, 0
+    wait      0, jmppin, 0
+    set       pindirs, 0
+    set       x, 7
+dbit:
+    wait      1, jmppin, 0
+    in        pins, 1
+    wait      0, jmppin, 0
+    jmp       x--, dbit
+    push      block
+    ; ACK data
+    set       pindirs, 1
+    set       pins, 0
+    wait      1, jmppin, 0
+    wait      0, jmppin, 0
+    set       pindirs, 0
+    jmp       start
+nack:
+    set       pindirs, 0         ; NACK = release SDA
+    wait      1, jmppin, 0
+    wait      0, jmppin, 0
+    jmp       start

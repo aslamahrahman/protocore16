@@ -1,0 +1,39 @@
+; ProtoCore16 I2C controller (compact) — START, addr byte, data byte, STOP
+; sideset=SCL, set/out/in=SDA. Open-drain via PINDIRS.
+
+.sideset 1
+
+start:
+    pull      block
+    set       pindirs, 0 side 1  ; SCL high, SDA released
+    set       pindirs, 1 side 1
+    set       pins, 0    side 1  ; START
+    nop                  side 0
+    set       x, 7
+abit:
+    set       pindirs, 1 side 0
+    out       pins, 1    side 0
+    nop                  side 1
+    nop                  side 0
+    jmp       x--, abit
+    set       pindirs, 0 side 0  ; ACK sample
+    nop                  side 1
+    in        pins, 1    side 1
+    nop                  side 0
+    push      noblock
+    pull      block
+    set       x, 7
+dbit:
+    set       pindirs, 1 side 0
+    out       pins, 1    side 0
+    nop                  side 1
+    nop                  side 0
+    jmp       x--, dbit
+    set       pindirs, 0 side 0
+    nop                  side 1
+    nop                  side 0
+    set       pindirs, 1 side 0  ; STOP
+    set       pins, 0    side 0
+    nop                  side 1
+    set       pindirs, 0 side 1
+    jmp       start

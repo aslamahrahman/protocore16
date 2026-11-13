@@ -1,0 +1,37 @@
+; ProtoCore16 10BASE-T TX stretch (Manchester)
+; 10 Mbit => 20 MBaud Manchester. At 50 MHz clk, 2.5 clocks/half-bit — use clkdiv=1
+; (tick every 2 clocks) and 1 instr/half-bit, or run at 20 MHz with div=0.
+;
+; FIFO bytes are raw Manchester-expanded by firmware:
+;   For each data bit: 0 -> 01 level pair, 1 -> 10 (IEEE IEEE 802.3 mid-bit transition)
+; Host can also pre-expand. CRC32 via CRC assist mode 3 before TX.
+;
+; Pin: TX_P on set_base; TX_N can be driven as inverse with sideset if wired.
+
+.sideset 1
+
+start:
+    pull      block
+    set       x, 7
+bitloop:
+    ; Isolate next data bit in OSR; emit two half-bits
+    ; bit=0: low then high; bit=1: high then low (one common convention)
+    out       null, 1            ; shift bit into... we need the bit value
+    ; Reload approach: MOV Y, OSR; test via CRC/side — simpler explicit:
+    ; Use OUT PINS for first half from a remapped table in host pre-encoding.
+    ; Pre-encoded path (recommended): each FIFO byte = 8 half-bit pairs packed.
+    out       pins, 1   side 0
+    out       pins, 1   side 1
+    jmp       x--, bitloop
+    jmp       start
+
+; Alternate: CRC32 clear + feed before sending frame
+crc_prep:
+    crc       3, 1, clear
+    pull      block
+    set       x, 7
+crc_bits:
+    crc       3, 1
+    jmp       x--, crc_bits
+    mov       y, crc
+    jmp       start

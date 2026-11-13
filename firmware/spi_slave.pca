@@ -1,0 +1,16 @@
+; ProtoCore16 SPI slave — Mode 0
+; WAIT on SCLK edges; OUT MISO, IN MOSI
+; jmp_pin / wait pin = SCLK; out_base=MISO; in_base=MOSI
+; CS gating left to host enable or a second SM.
+
+start:
+    pull      block              ; preload response byte (or use autopull)
+    set       x, 7
+bitloop:
+    wait      0, pin, 0          ; wait SCLK low
+    out       pins, 1            ; present MISO
+    wait      1, pin, 0          ; wait SCLK high
+    in        pins, 1            ; sample MOSI
+    jmp       x--, bitloop
+    push      block
+    jmp       start

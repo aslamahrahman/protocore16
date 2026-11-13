@@ -1,0 +1,17 @@
+; ProtoCore16 UART TX — 8N1, LSB first
+; Host: set_base=out_base=TX, set_count=1, autopull=1, pull_th=8, shift_right=1
+; clkdiv_int = (f_clk / baud) - 1 ; idle high before enable
+
+start:
+    pull      block
+    set       pins, 0            ; start bit
+    out       pins, 1            ; d0
+    out       pins, 1
+    out       pins, 1
+    out       pins, 1
+    out       pins, 1
+    out       pins, 1
+    out       pins, 1
+    out       pins, 1            ; d7
+    set       pins, 1            ; stop bit
+    jmp       start

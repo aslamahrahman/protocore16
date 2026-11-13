@@ -1,0 +1,32 @@
+; ProtoCore16 low-speed USB TX stretch (1.5 Mbit/s)
+; Uses NRZI encode assist + firmware bit stuffing outline.
+; Pins: D- on set_base (LS idle J = D- high for LS), D+ on adjacent pin via SIDESET.
+; Host clkdiv: f_clk/1.5e6 - 1  (e.g. 50 MHz -> div=32)
+;
+; This program NRZI-encodes a raw bit stream from TX FIFO (already includes SYNC,
+; PID, payload, CRC16 from host). Bit stuffing: host pre-stuffs OR use loop below
+; for a short packet path without stuffing (OK for KEEP-ALIVE / handshake PID demos).
+
+start:
+    nrzi      enc, clear         ; reset NRZI level to J
+    pull      block
+    set       x, 7
+bitloop:
+    nrzi      enc                ; consume OSR[0], drive SE0/J/K via level on set pin
+    ; For full LS: map nrzi_level_out to D-/D+ differential — host wire:
+    ;   D- = level, D+ = ~level for J/K; SE0 both low via SET both pindirs.
+    jmp       x--, bitloop
+    ; byte boundary — pull next or EOP
+    jmp       !x, start          ; if X hit 0 from countdown... already consumed
+    ; After byte, if FIFO has more, continue
+    pull      ifempty, noblock
+    jmp       !x, eop            ; reuse: if scratch empty path
+    set       x, 7
+    jmp       bitloop
+eop:
+    ; SE0 for 2 bit times then J
+    set       pins, 0
+    set       pindirs, 1         ; drive low (SE0 needs both lines — simplified single-ended demo)
+    waitg     2
+    set       pins, 1            ; J idle
+    jmp       start

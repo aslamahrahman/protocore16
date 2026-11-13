@@ -1,0 +1,34 @@
+; ProtoCore16 CAN bit-bang (simplified classic CAN controller TX)
+; Recessive=1, dominant=0 on a single TX pin (external transceiver on Pmod).
+; Bit stuffing every 5 identical bits — host pre-stuffs frame into FIFO for reliability;
+; this program hard-times bits via clkdiv (e.g. 1 Mbit @ 50 MHz => div=49).
+; CRC15 can be computed with CRC assist mode 1/2 adapted, or host-side.
+
+start:
+    pull      block              ; first byte of stuffed bitstream
+    set       x, 7
+bitloop:
+    out       pins, 1
+    jmp       x--, bitloop
+    ; Inter-byte: continue while FIFO nonempty
+    pull      ifempty, noblock
+    mov       x, status
+    ; if empty, send EOF recessive and idle
+    jmp       !x, eof
+    set       x, 7
+    jmp       bitloop
+eof:
+    set       pins, 1            ; recessive
+    waitg     10                 ; EOF + IFS gap (approx)
+    jmp       start
+
+; Optional CRC feed routine for host-orchestrated CRC15
+crc15_feed:
+    crc       1, 1, clear
+    pull      block
+    set       x, 7
+cbit:
+    crc       1, 1
+    jmp       x--, cbit
+    mov       y, crc
+    jmp       start

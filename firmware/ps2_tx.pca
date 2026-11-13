@@ -1,0 +1,31 @@
+; ProtoCore16 PS/2 device TX (keyboard/mouse style)
+; Open-drain clock/data. Device generates clock ~10–16.7 kHz.
+; Frame: start0, 8 data, odd parity, stop1. Host precomputes parity in FIFO as 9th bit optional.
+; Pins: side=CLK, set/out=DATA
+
+.sideset 1
+
+start:
+    pull      block
+    ; inhibit check: if CLK low, wait (host/system inhibit)
+    wait      1, jmppin, 0
+    set       pindirs, 1 side 1
+    set       pins, 0    side 1  ; data start=0, clk high
+    set       x, 8               ; 8 data + we clock parity separately
+    nop                  side 0  ; clock low
+    nop                  side 1
+dbit:
+    out       pins, 1    side 1
+    nop                  side 0
+    nop                  side 1
+    jmp       x--, dbit
+    ; parity from FIFO next pull or X — here second pull
+    pull      block
+    out       pins, 1    side 1
+    nop                  side 0
+    nop                  side 1
+    set       pins, 1    side 1  ; stop
+    set       pindirs, 0 side 1  ; release data
+    nop                  side 0
+    nop                  side 1
+    jmp       start

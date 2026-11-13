@@ -1,0 +1,22 @@
+; ProtoCore16 UART RX — 8N1, samples mid-bit
+; Host: in_base=RX, jmp_pin=RX, autopush=1, push_th=8, shift_right=1
+; clkdiv_int = (f_clk / baud) - 1
+; Start: wait for falling edge, delay half-bit (WAITG), then sample 8 bits
+
+.equ HALF, 0                     ; set WAITG via host timing: use delay field instead
+
+start:
+    wait      0, pin, 0          ; wait for start edge (RX low); pin index set to 0 relative — use WAIT idx=in pin
+    waitg     0                  ; host should use clkdiv so half-bit ~= 0 extra; refine below
+    ; sample mid-bit: one full bit time after half — approximate with IN+delay
+    in        pins, 1            ; bit0
+    in        pins, 1
+    in        pins, 1
+    in        pins, 1
+    in        pins, 1
+    in        pins, 1
+    in        pins, 1
+    in        pins, 1            ; bit7
+    push      block
+    wait      1, pin, 0          ; wait stop high
+    jmp       start

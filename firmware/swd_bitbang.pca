@@ -1,0 +1,29 @@
+; ProtoCore16 SWD (Serial Wire Debug) bit-bang
+; Pins: SWCLK=sideset, SWDIO=bidir on set/in/out base
+; Host pushes raw SWD bits; program handles turnaround by switching PINDIRS.
+
+.sideset 1
+
+; Write phase: host FIFO bits, OE=1
+write_bits:
+    pull      block
+    set       x, 7
+    set       pindirs, 1
+wbit:
+    out       pins, 1   side 0
+    nop                 side 1
+    nop                 side 0
+    jmp       x--, wbit
+    ; Turnaround: release SWDIO for 1 cycle
+    set       pindirs, 0 side 0
+    nop                  side 1
+    nop                  side 0
+    set       x, 2               ; ACK 3 bits
+rack:
+    waitg     0
+    in        pins, 1   side 0
+    nop                 side 1
+    nop                 side 0
+    jmp       x--, rack
+    push      block
+    jmp       write_bits

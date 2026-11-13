@@ -1,0 +1,53 @@
+# Tiny Tapeout project information — ProtoCore16
+project:
+  title:        "ProtoCore16"
+  author:       "ProtoCore16 contributors"
+  discord:      ""
+  description:  "4× programmable protocol engines (UART/SPI/I2C + USB/Eth assists)"
+  language:     "Verilog"
+  clock_hz:     50000000
+
+  # Jane Street protocol emulator competition: 8x4 tiles on IHP CMOS5L
+  tiles: "8x4"
+
+  top_module:  "tt_um_protocore16"
+
+  source_files:
+    - "tt_um_protocore16.v"
+    - "pe_engine.v"
+    - "host_if.v"
+    - "fifo4x8.v"
+    - "crc_unit.v"
+    - "nrzi_unit.v"
+
+pinout:
+  # SPI host (RP2350 / programmer)
+  ui[0]: "HOST_SCLK"
+  ui[1]: "HOST_MOSI"
+  ui[2]: "HOST_CS_N"
+  ui[3]: ""
+  ui[4]: ""
+  ui[5]: ""
+  ui[6]: ""
+  ui[7]: ""
+
+  uo[0]: "HOST_MISO"
+  uo[1]: "IRQ"
+  uo[2]: ""
+  uo[3]: ""
+  uo[4]: ""
+  uo[5]: ""
+  uo[6]: ""
+  uo[7]: ""
+
+  # Protocol GPIO (reprogrammable per firmware)
+  uio[0]: "GPIO0"
+  uio[1]: "GPIO1"
+  uio[2]: "GPIO2"
+  uio[3]: "GPIO3"
+  uio[4]: "GPIO4"
+  uio[5]: "GPIO5"
+  uio[6]: "GPIO6"
+  uio[7]: "GPIO7"
+
+yaml_version: 6
