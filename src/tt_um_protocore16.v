@@ -145,10 +145,14 @@ module tt_um_protocore16 (
             .nrzi_clear(nz_c[idx]), .nrzi_enc_en(nz_e[idx]), .nrzi_dec_en(nz_d[idx]), \
             .nrzi_din(nz_di[idx]), .nrzi_level_in(nz_li[idx]), \
             .nrzi_dout(nrzi_dout), .nrzi_level_out(nrzi_level_out), \
+            /* verilator lint_off PINCONNECTEMPTY */ \
             .pc_out(pc``idx), .busy(bz``idx), .x_out(), .y_out() \
+            /* verilator lint_on PINCONNECTEMPTY */ \
         );
 
     // Manual instances (macros with `` can be fragile) — expand:
+    // x_out/y_out intentionally unused at top (debug-only PE ports).
+    /* verilator lint_off PINCONNECTEMPTY */
     pe_engine #(.SM_ID(0)) u_pe0 (
         .clk(clk), .rst_n(rst_n), .enable(sm_enable[0]),
         .imem_we(imem_we0), .imem_waddr(imem_waddr), .imem_wdata(imem_wdata),
@@ -221,6 +225,7 @@ module tt_um_protocore16 (
         .nrzi_din(nz_di[3]), .nrzi_level_in(nz_li[3]), .nrzi_dout(nrzi_dout), .nrzi_level_out(nrzi_level_out),
         .pc_out(pc3), .busy(bz3), .x_out(), .y_out()
     );
+    /* verilator lint_on PINCONNECTEMPTY */
 
     // GPIO merge
     reg [7:0] gout, goe;

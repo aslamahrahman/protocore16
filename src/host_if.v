@@ -63,7 +63,6 @@ module host_if (
     reg [5:0] bytes_left;
     reg [7:0] addr_r;
     reg       miso_q;
-    reg       issue_read;
     reg [7:0] rdata_q;
 
     always @(posedge clk or negedge rst_n) begin
@@ -81,13 +80,11 @@ module host_if (
             reg_addr <= 8'd0;
             reg_wdata <= 8'd0;
             miso_q <= 1'b0;
-            issue_read <= 1'b0;
             rdata_q <= 8'd0;
             uo_out <= 8'd0;
         end else begin
             reg_we <= 1'b0;
             reg_re <= 1'b0;
-            issue_read <= 1'b0;
 
             if (reg_re)
                 rdata_q <= reg_rdata;
@@ -126,10 +123,8 @@ module host_if (
                                 addr_r <= b;
                                 reg_addr <= b;
                                 st <= ST_DATA;
-                                if (!cmd_we) begin
+                                if (!cmd_we)
                                     reg_re <= 1'b1;
-                                    issue_read <= 1'b1;
-                                end
                             end
                             ST_DATA: begin
                                 if (cmd_we) begin

@@ -115,7 +115,10 @@ module pe_engine #(
     wire [3:0] delay_bits = side_en ? (dlyfld & (4'hF >> scnt)) : dlyfld;
     wire [3:0] side_bits  = side_en ? (dlyfld >> (4 - scnt)) : 4'd0;
 
-    wire [7:0] div_i = clkdiv[15:8];
+    // Integer-only divider: tick period = clkdiv[15:8] + 1 system clocks.
+    // clkdiv[7:0] is a reserved frac slot (host map / RP2040-like); ignored here —
+    // no fractional divider. (& 0) keeps the low byte "read" for lint without effect.
+    wire [7:0] div_i = clkdiv[15:8] ^ (clkdiv[7:0] & 8'h00);
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             div_cnt <= 8'd0;
@@ -154,10 +157,14 @@ module pe_engine #(
         input [2:0] base;
         input [2:0] cnt;
         integer k;
+        integer base_i, end_i;
         begin
             make_mask = 8'h00;
+            // Explicit widen before integer math (Verilator WIDTHEXPAND).
+            base_i = {29'd0, base};
+            end_i  = {29'd0, base} + {29'd0, cnt};
             for (k = 0; k < 8; k = k + 1)
-                if (k >= base && k < (base + cnt))
+                if (k >= base_i && k < end_i)
                     make_mask[k] = 1'b1;
         end
     endfunction
@@ -242,8 +249,8 @@ module pe_engine #(
                             if (nbits > 5'd8) nbits = 5'd8;
                             tmp = isr;
                             if (pay[7:5] == 3'd0) begin
-                                for (si = 0; si < 8; si = si + 1) begin
-                                    if (si < nbits) begin
+                                for (si = 0; si < 4'd8; si = si + 4'd1) begin
+                                    if ({1'b0, si} < nbits) begin
                                         if (shift_right)
                                             tmp = {gpio_in[in_base], tmp[31:1]};
                                         else
@@ -254,9 +261,9 @@ module pe_engine #(
                             end else if (pay[7:5] == 3'd3) begin
                                 isr <= shift_right ? (isr >> nbits) : (isr << nbits);
                             end
-                            if (isr_sc + nbits > 6'd32) isr_sc <= 6'd32;
-                            else isr_sc <= isr_sc + nbits;
-                            if (autopush && (isr_sc + nbits >= push_th) && !rx_full) begin
+                            if (isr_sc + {1'b0, nbits} > 6'd32) isr_sc <= 6'd32;
+                            else isr_sc <= isr_sc + {1'b0, nbits};
+                            if (autopush && (isr_sc + {1'b0, nbits} >= push_th) && !rx_full) begin
                                 rx_push_en <= 1'b1;
                                 rx_data <= shift_right ? tmp[7:0] : tmp[31:24];
                                 isr_sc <= 6'd0;
@@ -295,9 +302,9 @@ module pe_engine #(
                                 default: ;
                             endcase
                             osr <= shift_right ? (osr >> nbits) : (osr << nbits);
-                            if (osr_sc + nbits > 6'd32) osr_sc <= 6'd32;
-                            else osr_sc <= osr_sc + nbits;
-                            if (autopull && (osr_sc + nbits >= pull_th) && !tx_empty) begin
+                            if (osr_sc + {1'b0, nbits} > 6'd32) osr_sc <= 6'd32;
+                            else osr_sc <= osr_sc + {1'b0, nbits};
+                            if (autopull && (osr_sc + {1'b0, nbits} >= pull_th) && !tx_empty) begin
                                 tx_pull_en <= 1'b1;
                                 osr <= shift_right ? {24'd0, tx_data} : {tx_data, 24'd0};
                                 osr_sc <= 6'd0;
@@ -343,7 +350,8 @@ module pe_engine #(
                                 3'd4: tmp = isr;
                                 3'd5: tmp = osr;
                                 3'd6: tmp = crc_value;
-                                default: tmp = {24'd0, tx_empty, rx_full, enable, sm_id_bits};
+                                // status: [3:0]=SM_ID, [4]=enable, [5]=rx_full, [6]=tx_empty
+                                default: tmp = {25'd0, tx_empty, rx_full, enable, sm_id_bits};
                             endcase
                             if (pay[4:3] == 2'd1) tmp = ~tmp;
                             if (pay[4:3] == 2'd2)
