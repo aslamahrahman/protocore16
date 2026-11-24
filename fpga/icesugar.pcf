@@ -1,0 +1,35 @@
+# Muse Lab iCESugar v1.5 — iCE40UP5K-SG48
+# Classic UP5K pinout (NOT iCESugar-nano LP1K, NOT iCESugar-pro ECP5).
+# Sources: wuxx/icesugar README + hdl/constraints board/iCESugar-v1.5
+
+# 12 MHz from iCELink MCO
+set_io clk_12m 35
+
+# DIP switch SW0 (PMOD4 pin 1 / FPGA 21). RTL SB_IO PULLUP; closed/low = reset.
+# Boards without the DIP: pin floats high via FPGA pull-up → run (not stuck in reset).
+set_io rst_btn_n 21
+
+# ---- Host SPI on PMOD2 (Muse Lab labels; Pico GP2–GP6 default) ----
+# PMOD2 vertical (USB-C left): inner P46,P44,P42,P37,GND,3V3 / outer P45,P43,P38,P36,GND,3V3
+# Source: STM32World ICESugar_Original_Pinout.webp
+set_io spi_sclk 46
+set_io spi_mosi 44
+set_io spi_cs_n 42
+set_io spi_miso 37
+set_io spi_irq  36
+
+# ---- Protocol GPIO on PMOD3 → uio[7:0] ----
+# gpio[0] = UART TX smoke pin (also drives RGB green via SB_RGBA_DRV)
+set_io gpio[0] 34
+set_io gpio[1] 31
+set_io gpio[2] 27
+set_io gpio[3] 25
+set_io gpio[4] 23
+set_io gpio[5] 26
+set_io gpio[6] 28
+set_io gpio[7] 32
+
+# On-board RGB LED (must use SB_RGBA_DRV in RTL)
+set_io led_b 39
+set_io led_r 40
+set_io led_g 41

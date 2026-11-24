@@ -3,20 +3,23 @@
 Tiny Tapeout **IHP CMOS5L** project layout (based on
 [`ttihp-verilog-template`](https://github.com/TinyTapeout/ttihp-verilog-template)).
 
-See the full write-up: [`../protocore16.md`](../protocore16.md)
+See the full write-up: [`docs/protocore16.md`](docs/protocore16.md)
 
 ```
 src/         Verilog RTL + LibreLane config.json
 src/optional/  Optional IHP SRAM IMEM notes + sim stub
 asm/         Python assembler
 firmware/    Protocol programs (.pca)
-host/        SPI host helpers (protocore16.py)
+host/        SPI host helpers (protocore16.py) + Pico MicroPython (pico_protocore16.py)
+fpga/        iCESugar UP5K top, PCF, Yosys/nextpnr Makefile
 sim/         Directed Icarus testbenches + run_all.sh
 test/        cocotb harness (CI / template)
-docs/info.md Tiny Tapeout datasheet
+docs/        Write-up, ISA, protocols, FPGA bring-up, TT datasheet
 info.yaml    8×4 project metadata
 .github/     gds / precheck / test / docs workflows
 ```
+
+FPGA bring-up: [`docs/fpga-icesugar.md`](docs/fpga-icesugar.md) (Pico SPI host → PMOD2).
 
 ## Verify
 

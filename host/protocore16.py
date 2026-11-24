@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Host helpers for ProtoCore16 SPI Mode-0 register interface.
 
-SPI pins (Tiny Tapeout):
+SPI pins (Tiny Tapeout / iCESugar FPGA top):
   ui[0]=SCLK  ui[1]=MOSI  ui[2]=CS_N  uo[0]=MISO  uo[1]=IRQ
 
 Frame while CS low (MSB first):
@@ -11,12 +11,18 @@ Frame while CS low (MSB first):
 
 Reads need a few idle system clocks between ADDR and DATA so the slave can
 latch reg_rdata into its shift register (see sim/tb_host_spi.v).
+
+Board bring-up (Raspberry Pi Pico MicroPython): see pico_protocore16.py —
+same register helpers / uart_tx smoke, bit-bang SPI on GP2–GP6 → iCESugar PMOD2.
+This module stays CPython/sim-oriented (HostBFM + PyEngine). FT232H is optional
+only; Pico is the documented hardware host path.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Protocol
 
 
 # Register map (matches tt_um_protocore16.v)
@@ -54,8 +60,46 @@ def load_hex(path: str | Path) -> list[int]:
     return words
 
 
+class RegBus(Protocol):
+    """Minimal register access used by ProtoCore16Client helpers."""
+
+    def write_reg(self, addr: int, data: int) -> None: ...
+    def read_reg(self, addr: int) -> int: ...
+
+
+class ProtoCore16Client:
+    """Shared programming helpers; subclass or mix in with write_reg/read_reg.
+
+    Hardware path: MicroPython on Pico implements the same methods in
+    pico_protocore16.py (cannot import this file on-device).
+    """
+
+    def load_program(self: RegBus, sm: int, words: list[int]) -> None:
+        self.write_reg(REG_SMSEL, sm)
+        self.write_reg(REG_PROG_OFF, 0)
+        for w in words:
+            self.write_reg(REG_PROG_DATA, w & 0xFF)
+            self.write_reg(REG_PROG_DATA, (w >> 8) & 0xFF)
+
+    def configure_uart_tx(self: RegBus, sm: int, tx_pin: int, clkdiv_int: int) -> None:
+        self.write_reg(REG_SMSEL, sm)
+        self.write_reg(REG_CLKDIV_LO, 0)
+        self.write_reg(REG_CLKDIV_HI, clkdiv_int & 0xFF)
+        self.write_reg(REG_PINCTRL, ((tx_pin & 7) << 2) | 1)
+        self.write_reg(REG_PINCTRL2, ((tx_pin & 7) << 5) | ((tx_pin & 7) << 2))
+        self.write_reg(REG_EXECCTRL, (1 << 5) | (1 << 4))  # autopull, shift_right
+        self.write_reg(REG_SHIFTCTRL, (8 << 4) | 8)
+
+    def enable_sm(self: RegBus, mask: int) -> None:
+        self.write_reg(REG_CTRL, mask & 0xF)
+
+    def tx_push(self: RegBus, sm: int, byte: int) -> None:
+        self.write_reg(REG_SMSEL, sm)
+        self.write_reg(REG_TXFIFO, byte & 0xFF)
+
+
 @dataclass
-class HostBFM:
+class HostBFM(ProtoCore16Client):
     """SPI Mode-0 BFM driven via clocked callbacks (cocotb / Verilog-TB glue)."""
 
     write_ui: callable
@@ -100,29 +144,6 @@ class HostBFM:
         val = self._byte(0x00)
         self._drive(0, 0, 1, 4)
         return val
-
-    def load_program(self, sm: int, words: list[int]) -> None:
-        self.write_reg(REG_SMSEL, sm)
-        self.write_reg(REG_PROG_OFF, 0)
-        for w in words:
-            self.write_reg(REG_PROG_DATA, w & 0xFF)
-            self.write_reg(REG_PROG_DATA, (w >> 8) & 0xFF)
-
-    def configure_uart_tx(self, sm: int, tx_pin: int, clkdiv_int: int) -> None:
-        self.write_reg(REG_SMSEL, sm)
-        self.write_reg(REG_CLKDIV_LO, 0)
-        self.write_reg(REG_CLKDIV_HI, clkdiv_int & 0xFF)
-        self.write_reg(REG_PINCTRL, ((tx_pin & 7) << 2) | 1)
-        self.write_reg(REG_PINCTRL2, ((tx_pin & 7) << 5) | ((tx_pin & 7) << 2))
-        self.write_reg(REG_EXECCTRL, (1 << 5) | (1 << 4))  # autopull, shift_right
-        self.write_reg(REG_SHIFTCTRL, (8 << 4) | 8)
-
-    def enable_sm(self, mask: int) -> None:
-        self.write_reg(REG_CTRL, mask & 0xF)
-
-    def tx_push(self, sm: int, byte: int) -> None:
-        self.write_reg(REG_SMSEL, sm)
-        self.write_reg(REG_TXFIFO, byte & 0xFF)
 
 
 @dataclass
