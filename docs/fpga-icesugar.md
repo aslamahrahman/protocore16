@@ -1,6 +1,6 @@
 # ProtoCore16 on Muse Lab iCESugar (iCE40UP5K)
 
-FPGA bring-up for the **classic iCESugar v1.5** (Lattice **iCE40UP5K-SG48**): board top, PCF, Yosys/nextpnr build, and a **Raspberry Pi Pico** SPI Mode-0 host that loads `uart_tx` firmware.
+FPGA bring-up for the **classic iCESugar v1.5** (Lattice **iCE40UP5K-SG48**): board top, PCF, Yosys/nextpnr build, and a **Raspberry Pi Pico** SPI Mode-0 host that loads `uart_tx` / `spi_master` / `i2c_controller` firmware and can bitbang an SPI **slave** or I²C **target** on free GPs.
 
 RTL / build: [`../fpga/`](../fpga/) · Pico host: [`../host/pico_protocore16.py`](../host/pico_protocore16.py) · Shared helpers: [`../host/protocore16.py`](../host/protocore16.py)
 
@@ -37,7 +37,7 @@ Dry synth in this workspace (oss-cad-suite): **PASS** — ~72% LC, Fmax ≈ 12.9
 
 **Flash:** copy `build/protocore16_icesugar.bin` onto the USB mass-storage device named **iCELink**, or `make prog` if `iceprog`/`icesprog` is available.
 
-DIP **SW0** (FPGA pin 21): leave **open** to run; close to hold soft-POR + button reset (`rst_btn_n` low). Boards **without** the DIP are fine — `rst_btn_n` uses an FPGA `SB_IO` pull-up, so an unconnected pin floats high (= run). Soft-POR still runs at power-up. **Blue RGB** still means held in reset (soft-POR active, or DIP closed / pin driven low).
+DIP **SW0** (FPGA pin 21): leave **open** to run; close to hold soft-POR + button reset (`rst_btn_n` low).
 
 ---
 
@@ -50,6 +50,7 @@ Two USB cables to your computer; jumper wires between Pico and iCESugar PMOD2. N
  │   Your computer      │
  │  · copy .bin → iCELink mass storage
  │  · MicroPython / Thonny → Pico
+ │  · optional USB-UART on PMOD3 P34 @ 115200
  └───────┬──────────┬───┘
          │ USB      │ USB
          ▼          ▼
@@ -57,21 +58,28 @@ Two USB cables to your computer; jumper wires between Pico and iCESugar PMOD2. N
  │ Raspberry Pi  │  │ Muse Lab iCESugar (UP5K)             │
  │ Pico          │  │  iCELink (flash + 12 MHz clk)        │
  │               │  │  DIP SW0 open = run                  │
+ │ Host SPI (PMOD2):                                   │
  │ GP2 ──────────┼──► PMOD2 P46  SCLK → ui[0]              │
  │ GP3 ──────────┼──► PMOD2 P44  MOSI → ui[1]              │
  │ GP5 ──────────┼──► PMOD2 P42  CS_N → ui[2]              │
  │ GP4 ◄─────────┼─── PMOD2 P37  MISO ← uo[0]              │
  │ GP6 ◄─────────┼─── PMOD2 P36  IRQ  ← uo[1] (optional) │
- │ GND ──────────┼─── PMOD2 GND                            │
+ │ GND ──────────┼─── PMOD2 / PMOD3 GND                    │
  │               │  │                                      │
- │               │  │ PMOD3 P34  uio[0] = UART TX (smoke)  │
- │               │  │ RGB green also tracks UART TX        │
+ │ PE SPI / I²C (PMOD3 → free GPs, not GP2–5):         │
+ │ GP11 ◄────────┼─── PMOD3 P34  uio[0] MOSI / SDA / UART │
+ │ GP10 ◄────────┼─── PMOD3 P31  uio[1] SCLK / SCL         │
+ │ GP12 ─────────┼──► PMOD3 P27  uio[2] MISO (SPI only)    │
+ │ GP13 ◄────────┼─── PMOD3 P25  uio[3] CS* (SPI; fw idle) │
+ │               │  │ RGB green tracks uio[0] when driven  │
  └───────────────┘  └──────────────────────────────────────┘
 
  Power: each board from its own USB. Share GND only. All 3.3 V.
+ * spi_master.pca does not toggle CS — tie GP13 to GND or use ignore_cs=True.
+ * I²C reuses P34/P31 ↔ GP11/GP10; FPGA SB_IO pull-ups on gpio[] (optional 4.7 kΩ).
 ```
 
-Smoke path: computer flashes bitstream → computer loads Pico script → Pico SPI-programs ProtoCore16 → UART TX on PMOD3 / green LED.
+Smoke path: computer flashes bitstream → Pico SPI-programs ProtoCore16 on PMOD2 → UART TX, PE SPI master, or PE I²C controller on PMOD3 (Pico bitbangs SPI slave / I²C target).
 
 ---
 
@@ -82,7 +90,7 @@ Smoke path: computer flashes bitstream → computer loads Pico script → Pico S
 | Net | FPGA pin | Board |
 |-----|----------|--------|
 | `clk_12m` | 35 | iCELink 12 MHz |
-| `rst_btn_n` | 21 | DIP SW0 (`SB_IO` pull-up; closed/low = reset; missing DIP = run) |
+| `rst_btn_n` | 21 | DIP SW0 (pull-up; closed = reset) |
 | `led_b` / `led_r` / `led_g` | 39 / 40 / 41 | RGB via `SB_RGBA_DRV` (green tracks UART TX) |
 
 ### Host SPI → PMOD2 (Pico)
@@ -133,16 +141,40 @@ GP6  ◄─────────────────────  P36  IR
 
 ### Protocol GPIO → PMOD3
 
-| `uio` | FPGA pin | PMOD3 | Smoke use |
-|-------|----------|-------|-----------|
-| `[0]` | 34 | pin 1 (A0) | **UART TX** (scope / LED) |
-| `[1]` | 31 | pin 2 | — |
-| `[2]` | 27 | pin 3 | — |
-| `[3]` | 25 | pin 4 | — |
-| `[4]` | 23 | pin 7 | — |
-| `[5]` | 26 | pin 8 | — |
-| `[6]` | 28 | pin 9 | — |
-| `[7]` | 32 | pin 10 | — |
+| `uio` | FPGA pin | Board label | Smoke use | Pico GP |
+|-------|----------|-------------|-----------|---------|
+| `[0]` | 34 | **P34** | **UART TX** / **SPI MOSI** / **I²C SDA** (green LED) | **GP11** |
+| `[1]` | 31 | **P31** | **SPI SCLK** / **I²C SCL** | **GP10** |
+| `[2]` | 27 | **P27** | **SPI MISO** (PE in / Pico drives) | **GP12** |
+| `[3]` | 25 | **P25** | **SPI CS** wiring only (`spi_master.pca` idle) | **GP13** (tie GND or ignore) |
+| `[4]` | 23 | P23 | — | — |
+| `[5]` | 26 | P26 | — | — |
+| `[6]` | 28 | P28 | — | — |
+| `[7]` | 32 | P32 | — | — |
+
+Default PE SPI ↔ Pico slave (does **not** collide with host SPI GP2–5):
+
+```
+Pico slave                   iCESugar PMOD3
+-----------                  --------------
+GP10  ◄────────────────────  P31  SCLK  (uio[1])
+GP11  ◄────────────────────  P34  MOSI  (uio[0])
+GP12  ─────────────────────►  P27  MISO  (uio[2])
+GP13  ◄────────────────────  P25  CS*   (uio[3], optional)
+GND   ──────────────────────  GND
+```
+
+Default PE I²C controller ↔ Pico target (same two wires as SPI SCLK/MOSI):
+
+```
+Pico I²C target              iCESugar PMOD3
+---------------              --------------
+GP10  ◄────────────────────  P31  SCL  (uio[1], PE sideset)
+GP11  ◄───────────────────►  P34  SDA  (uio[0], open-drain + ACK)
+GND   ──────────────────────  GND
+```
+
+Pull-ups: every PMOD3 `gpio[]` already has an FPGA `SB_IO` pull-up. Short jumpers at `clkdiv_hi=255` (~47 kHz) usually work; add **4.7 kΩ to 3.3 V** on SDA/SCL if edges look soft or ACK is missed.
 
 ---
 
@@ -166,12 +198,13 @@ Optional: `mpremote cp … :main.py` for auto-run on boot, or use Thonny (Save a
 
 The script:
 
-- bit-bangs SPI **Mode 0** (idle clocks between ADDR and DATA on reads)
-- loads embedded `uart_tx` words (from `firmware/uart_tx.pca`)
-- sets SM0 `out_base`/`set_base` = **pin 0**, `clkdiv_hi` ≈ 12 MHz / 115200 − 1
-- enables SM0 and pushes `0x55` several times
+- bit-bangs host SPI **Mode 0** on GP2–5 (idle clocks between ADDR and DATA on reads)
+- embeds `uart_tx`, `spi_master`, and `i2c_controller` words (`firmware/*.pca` → `build/*.hex`)
+- `smoke_uart_tx` / `smoke_spi_master` / `smoke_i2c_controller` / `debug_spi` entry points
+- PE SPI slave: `SpiSlaveBitbang` IRQ capture on GP10–13 (`machine.SPI` is master-only on RP2 MicroPython)
+- PE I²C target: `I2cTargetBitbang` open-drain ACK on GP10/GP11 (`machine.I2C` is controller-only)
 
-API mirrors [`protocore16.py`](../host/protocore16.py) (`write_reg` / `load_program` / `configure_uart_tx` / `tx_push`). On-device MicroPython cannot import the CPython module; keep the two in sync when changing the register map.
+API mirrors [`protocore16.py`](../host/protocore16.py) (`write_reg` / `load_program` / `configure_uart_tx` / `configure_spi_master` / `configure_i2c_controller` / `tx_push`). On-device MicroPython cannot import the CPython module; keep the two in sync when changing the register map.
 
 **CircuitPython / C SDK:** same pin map and SPI Mode-0 framing; reuse the CMD/ADDR/DATA sequence from `HostBFM` / `ProtoCore16Pico`. Prefer MicroPython for the first smoke.
 
@@ -179,22 +212,129 @@ API mirrors [`protocore16.py`](../host/protocore16.py) (`write_reg` / `load_prog
 
 ---
 
-## Expected first smoke
+## Smoke tests
 
-| Check | What you should see |
-|-------|---------------------|
-| REPL | `STATUS=0x..` print, then `pushed 0x55 x8` |
-| Green RGB | Brief flashes while TX bits go low (idle TX is high → LED off) |
-| Scope on PMOD3 pin 1 | 8N1 UART, LSB first, idle high, start low, data `0x55` (~115200 baud @ 12 MHz) |
-| Blue RGB | On while held in reset (soft-POR, or DIP SW0 closed / `rst_btn_n` low) |
+Copy the host once, then run each smoke from `mpremote` (paths from Project store root):
 
-If STATUS reads hang or return stuck values: check CS pull-up / wiring, common GND, and that the bitstream is the `icesugar_protocore16_top` build (not a blink demo).
+```bash
+mpremote cp docs/solution/host/pico_protocore16.py :pico_protocore16.py
+```
+
+### 1. Host SPI — `debug_spi`
+
+Confirms Pico↔PMOD2 register path before any PE firmware.
+
+```bash
+mpremote exec "import pico_protocore16; pico_protocore16.debug_spi()"
+```
+
+| Check | Expect |
+|-------|--------|
+| STATUS ×4 | ~`0xF0` / `0xF1` idle on 1-PE cut (not stuck `0x00`) |
+| SMSEL write `0x5A` | readback `0x5A` |
+| CTRL write `0x01` | readback `0x01` |
+| default reg `0x7F` | `0xA5` on fpga1 cut |
+
+Fail → check MISO **P37↔GP4**, CS **P42↔GP5**, common GND, bitstream.
+
+### 2. UART TX + USB-UART hex (`0x55` @ 115200)
+
+Wire a USB-UART adapter RX to **PMOD3 P34**, GND shared, 8N1 **115200**.
+
+```bash
+mpremote exec "import pico_protocore16; pico_protocore16.smoke_uart_tx(baud=115200, byte=0x55, repeat=8)"
+```
+
+| Check | Expect |
+|-------|--------|
+| REPL | `STATUS=0xF0…`, `pushed 0x55 x8` |
+| USB-UART / scope on P34 | bytes `0x55`, 8N1, LSB first, idle high, start low |
+| Green RGB | brief flashes on data lows |
+
+### 3. Visible green LED — slow UART smoke
+
+Default `smoke_uart_tx()` uses `clkdiv_hi=255` (~46.9 kbaud) and many `0x00` frames so green stays visibly lit/flickering.
+
+```bash
+mpremote exec "import pico_protocore16; pico_protocore16.smoke_uart_tx()"
+```
+
+Green tracks **uio[0]** (P34) whenever that pin is OE-driven low. Blue RGB = held in reset (DIP SW0 closed / soft-POR).
+
+### 4. PE SPI master ↔ Pico SPI slave
+
+Add PMOD3↔GP10–13 wires (table above). Host SPI on GP2–5 stays connected. `spi_master.pca` drives MOSI/SCLK only; CS is not toggled — leave `ignore_cs=True` (default) or tie **GP13** to GND.
+
+```bash
+mpremote cp docs/solution/host/pico_protocore16.py :pico_protocore16.py
+mpremote exec "import pico_protocore16; pico_protocore16.smoke_spi_master()"
+# optional: smoke_spi_master(byte=0xA5, repeat=4, clkdiv_int=255)
+```
+
+**Expected PASS (REPL):**
+```
+PE SPI master smoke: MOSI=uio[0] SCLK=uio[1] MISO=uio[2] CS=uio[3](fw unused)
+Pico slave: SCLK=GP10 MOSI=GP11 MISO=GP12 CS=GP13 ignore_cs=True
+clkdiv_hi=255 (~46875 Hz bit ticks)  push 0xa5 x4
+STATUS=0xF0 (expect 0xF0 idle; 0x71=busy+TX pending leftover)
+slave captured: ['0xa5', '0xa5', '0xa5', '0xa5']
+PASS: saw 0xa5 on Pico slave MOSI
+STATUS after: 0xF0  PC=0x00  LEVELS=0x00 (expect ~0xF0/0xF1, PC~0)
+```
+
+| Check | Expect |
+|-------|--------|
+| REPL | `slave captured: ['0xa5', …]` and `PASS` (four `0xa5` typical) |
+| Green RGB | may flicker with MOSI on uio[0] during the transfer |
+| Scope on P31/P34 | Mode-0 SCLK + MOSI shifting `0xA5` (MSB first) |
+| STATUS after | `~0xF0` / `0xF1` (idle or pull-stalled empty) — **not** `0x01` |
+
+**STATUS decode (1-PE cut):** `{tx_e0, 3'b111, 3'b000, bz0}` → idle `0xF0`; `0x71` = SM busy + TX FIFO not empty (leftover / stuck); a lone `0x01` after enable was a **false read** of CTRL before the host double-read latch fix.
+
+**MicroPython slave limits:** `machine.SPI` on RP2040/RP2350 is **master-only**. This smoke uses `SpiSlaveBitbang` with **SCLK rising-edge IRQ on core 0** (not `_thread` — dual-core Pin polling misses edges). Default `clkdiv_hi=255` (~47 kHz). Do not put the slave on GP2–5 (host SPI).
+
+**Host kick sequence (no reflash):** `prepare_sm` stops SM, drains RX, forces PC→0 (IMEM jmp-0 pulse + TX pull-drain), then loads `spi_master`, configures with **autopush off** (firmware already `push`es; autopush+push filled RX after two bytes and parked PC on push-block), pushes TX, IRQ-arms, enables.
+
+If STATUS stays `0x00`: check CS pull-up / wiring, common GND, and that the bitstream is the `icesugar_protocore16_top` build (not a blink demo). **Reflash is not required** for this SPI-slave smoke fix (host-only).
+
+### 5. PE I²C controller ↔ Pico I²C target
+
+Reuse the SPI MOSI/SCLK jumpers: **P34↔GP11 (SDA)**, **P31↔GP10 (SCL)**, common GND. Host SPI on GP2–5 stays connected. `i2c_controller.pca` does START → addr byte → ACK sample → data byte → STOP; Pico is an open-drain **target** that ACKs when the 7-bit address matches (`addr_byte>>1`, default `0xA0` → `0x50`).
+
+```bash
+mpremote cp docs/solution/host/pico_protocore16.py :pico_protocore16.py
+mpremote exec "import pico_protocore16; pico_protocore16.smoke_i2c_controller()"
+# optional: smoke_i2c_controller(addr_byte=0xA0, data_byte=0x5A, repeat=1, clkdiv_int=255)
+```
+
+**Expected PASS (REPL):**
+```
+PE I2C controller smoke: SDA=uio[0] SCL=uio[1]
+Pico target: SCL=GP10 SDA=GP11 addr7=0x50 (expect addr_byte=0xa0)
+clkdiv_hi=255 (~46875 Hz ticks)  push addr=0xa0 data=0x5a x1
+STATUS=0xF0 (expect 0xF0 idle)
+target addr_byte=0xa0 data=['0x5a'] acks=2 matched=True
+PASS: Pico target saw addr 0xa0 data 0x5a and ACKed
+STATUS after: 0xF0  PC=0x00  LEVELS=0x00 (expect ~0xF0/0xF1, PC~0)
+```
+
+| Check | Expect |
+|-------|--------|
+| REPL | `PASS: Pico target saw addr 0xa0 data 0x5a and ACKed` |
+| Wiring | P34↔GP11 SDA, P31↔GP10 SCL, GND (same as SPI MOSI/SCLK) |
+| Pull-ups | FPGA `SB_IO` pull-ups present; optional **4.7 kΩ** to 3.3 V on SDA/SCL |
+| Green RGB | may flicker when SDA is driven low on uio[0] |
+| STATUS after | `~0xF0` / `0xF1` — **not** stuck `0x00` |
+
+**MicroPython target limits:** `machine.I2C` on RP2040/RP2350 is **controller-only**. This smoke uses `I2cTargetBitbang` with **SCL/SDA edge IRQs on core 0** (not `_thread`). Default `clkdiv_hi=255` (~47 kHz). Do not put the target on GP2–5 (host SPI).
+
+**Host kick sequence (no reflash):** `prepare_sm` → load `i2c_controller` → `configure_i2c_controller` (**autopush off**; firmware `push`es the ACK sample) → push addr then data → IRQ-arm → enable. **Reflash is not required** — host-only (pin map already on PMOD3 uio[0]/1]).
 
 ---
 
 ## Build notes
 
-- Board top: [`../fpga/icesugar_protocore16_top.v`](../fpga/icesugar_protocore16_top.v) — soft-POR, `SB_IO` pull-up on `rst_btn_n` (and SPI/GPIO), `SB_RGBA_DRV` for RGB (blue = reset).
+- Board top: [`../fpga/icesugar_protocore16_top.v`](../fpga/icesugar_protocore16_top.v) — soft-POR, `SB_IO` for SPI/GPIO, `SB_RGBA_DRV` for RGB.
 - Core: [`../fpga/tt_um_protocore16_fpga1.v`](../fpga/tt_um_protocore16_fpga1.v) — **1× PE** cut with the same host SPI / SM0 register map. The full 4-PE ASIC top ([`../src/tt_um_protocore16.v`](../src/tt_um_protocore16.v)) synthesizes to ~2.6× the UP5K LC budget (FF IMEMs); SM1–3 are omitted on FPGA. Pico `uart_tx` smoke uses SM0 only.
-- PE bit rate uses integer `clkdiv[15:8]` only (`clkdiv[7:0]` reserved). At 12 MHz, `clkdiv_hi=103` ≈ 115.4 kbaud; max period is 256 clocks (~46.9 kbaud minimum for that formula).
+- PE bit rate uses integer `clkdiv[15:8]` only (`clkdiv[7:0]` reserved). At 12 MHz, `clkdiv_hi=103` ≈ 115.4 kbaud; max period is 256 clocks (~46.9 kbaud minimum for that formula). SPI master and I²C controller smokes default to `clkdiv_hi=255` so the Pico bitbang target can keep up.
 - PMOD1 is left free (onboard USB/UART aliases).
