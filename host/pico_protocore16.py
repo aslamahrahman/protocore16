@@ -19,9 +19,10 @@
 #   PMOD3 P25  uio[3] CS*   →  Pico GP13  (*spi_master.pca does not toggle CS;
 #                              tie GP13 to GND or ignore_cs=True on the slave)
 #
-# PE I²C-controller smoke (same PMOD3 P34/P31 → GP11/GP10; open-drain + ACK):
-#   PMOD3 P34  uio[0] SDA  ↔  Pico GP11  (set/out/in base; PINDIRS open-drain)
+# PE I²C-controller smoke (same PMOD3 P34/P31 → GP11/GP10; Pico listen-only):
+#   PMOD3 P34  uio[0] SDA  →  Pico GP11  (set/out/in; PE open-drain via PINDIRS)
 #   PMOD3 P31  uio[1] SCL  →  Pico GP10  (sideset; PE drives)
+#   Pico uses Pin.IN + START/SCL IRQs (not OPEN_DRAIN — that hid external edges).
 #   FPGA SB_IO pull-ups on gpio[]; optional external 4.7 kΩ to 3.3 V on SDA/SCL
 #
 # UART TX smoke appears on PMOD3 P34 (gpio[0]) and the green RGB LED.
@@ -389,36 +390,40 @@ class SpiSlaveBitbang:
 
 
 class I2cTargetBitbang:
-    """Open-drain I²C target/slave for PE i2c_controller.pca (MicroPython).
+    """Listen-only I²C target capture for PE i2c_controller.pca (MicroPython).
 
-    machine.I2C is controller-only on RP2 MicroPython — bitbang + IRQ only.
-    SDA uses OPEN_DRAIN (0=drive low, 1=release). SCL is input (PE sideset).
-    Matches 7-bit `address` on the addr byte (R/W LSB ignored for match),
-    ACKs addr+data, records bytes. Prefer irq_arm on core 0 (same SPI lesson).
+    machine.I2C is controller-only on RP2 — bitbang + IRQ only. Same lesson as
+    SpiSlaveBitbang: Pin.IN + edge IRQ on core 0 (not OPEN_DRAIN, not _thread).
 
-    ACK hold: after the 8th data SCL rise we drive SDA low, ignore the following
-    data-bit SCL fall, see the ACK SCL rise, then release on that ACK's SCL fall.
+    Why not OPEN_DRAIN ACK on the smoke path: driving/reconfiguring SDA as
+    OPEN_DRAIN made the pad miss external START/bit edges (acks=0 / addr=None
+    while PE still finished — firmware does not stall on NACK). Listen-only is
+    enough: skip the ACK SCL rises in the bit counter, record addr+data.
+
+    START = SDA↓ while SCL high. Sample SDA on each SCL↑ (MSB first).
     """
 
     def __init__(self, scl=PIN_I2C_SCL, sda=PIN_I2C_SDA, address=0x50):
-        self.scl = Pin(scl, Pin.IN, Pin.PULL_UP)
-        self.sda = Pin(sda, Pin.OPEN_DRAIN, Pin.PULL_UP)
-        self.sda.value(1)  # released
+        self._scl_n = scl
+        self._sda_n = sda
         self.address = address & 0x7F
+        # Kill leftover SPI-slave IRQs / OUT mode on the same GPs, then IN+pull.
+        self.scl = Pin(scl, Pin.IN, Pin.PULL_UP)
+        self.sda = Pin(sda, Pin.IN, Pin.PULL_UP)
+        self.scl.irq(handler=None)
+        self.sda.irq(handler=None)
+        self._reset_capture()
+
+    def _reset_capture(self):
         self._bits = 0
         self._bitn = 0
-        self._phase = 0  # 0=idle 1=addr 2=ack_addr 3=data 4=ack_data 5=done
-        self._ack_seen = False
+        self._phase = 0  # 0=idle 1=addr 2=data 3=done
+        self._skip_ack = False
         self._addr_byte = None
         self._data_bytes = []
         self._matched = False
-        self._acked = 0
-
-    def _sda_release(self):
-        self.sda.value(1)
-
-    def _sda_low(self):
-        self.sda.value(0)
+        self._starts = 0
+        self._scl_edges = 0
 
     def _on_sda_fall(self, _pin):
         # START: SDA↓ while SCL high
@@ -426,23 +431,21 @@ class I2cTargetBitbang:
             self._bits = 0
             self._bitn = 0
             self._phase = 1
-            self._ack_seen = False
+            self._skip_ack = False
             self._matched = False
-            self._sda_release()
-
-    def _on_sda_rise(self, _pin):
-        # STOP: SDA↑ while SCL high
-        if self.scl.value() == 1 and self._phase not in (0, 5):
-            self._phase = 5
-            self._sda_release()
+            self._starts += 1
 
     def _on_scl_rise(self, _pin):
-        ph = self._phase
-        if ph == 2 or ph == 4:
-            # ACK SCL high while we hold SDA low
-            self._ack_seen = True
+        if self._phase == 0 or self._phase == 3:
             return
-        if ph != 1 and ph != 3:
+        self._scl_edges += 1
+        # ACK slot after every 8 data bits — PE samples, we do not shift
+        if self._skip_ack:
+            self._skip_ack = False
+            if self._phase == 1:
+                self._phase = 2  # next bits are data
+            else:
+                self._phase = 3  # done after data ACK
             return
         self._bits = ((self._bits << 1) | (self.sda.value() & 1)) & 0xFF
         self._bitn += 1
@@ -451,74 +454,34 @@ class I2cTargetBitbang:
         byte = self._bits
         self._bits = 0
         self._bitn = 0
-        self._ack_seen = False
-        if ph == 1:
+        self._skip_ack = True
+        if self._phase == 1:
             self._addr_byte = byte
             self._matched = ((byte >> 1) & 0x7F) == self.address
-            if self._matched:
-                self._sda_low()
-                self._acked += 1
-                self._phase = 2
-            else:
-                self._sda_release()
-                self._phase = 0  # NACK / ignore
-        else:  # data
+        else:
             self._data_bytes.append(byte)
-            self._sda_low()
-            self._acked += 1
-            self._phase = 4
-
-    def _on_scl_fall(self, _pin):
-        # Release only after the ACK SCL high was observed (skip data-bit fall)
-        if self._phase == 2 and self._ack_seen:
-            self._sda_release()
-            self._ack_seen = False
-            self._phase = 3
-        elif self._phase == 4 and self._ack_seen:
-            self._sda_release()
-            self._ack_seen = False
-            self._phase = 5
-
-    def _on_sda_edge(self, pin):
-        if pin.value() == 0:
-            self._on_sda_fall(pin)
-        else:
-            self._on_sda_rise(pin)
-
-    def _on_scl_edge(self, pin):
-        if pin.value() == 1:
-            self._on_scl_rise(pin)
-        else:
-            self._on_scl_fall(pin)
 
     def irq_arm(self):
-        self._bits = 0
-        self._bitn = 0
-        self._phase = 0
-        self._ack_seen = False
-        self._addr_byte = None
-        self._data_bytes = []
-        self._matched = False
-        self._acked = 0
-        self._sda_release()
-        self.sda.irq(handler=self._on_sda_edge, trigger=Pin.IRQ_FALLING | Pin.IRQ_RISING)
-        self.scl.irq(
-            handler=self._on_scl_edge,
-            trigger=Pin.IRQ_RISING | Pin.IRQ_FALLING,
-        )
+        self._reset_capture()
+        # Re-assert IN (clears any prior OUT/OPEN_DRAIN from older host builds)
+        self.scl = Pin(self._scl_n, Pin.IN, Pin.PULL_UP)
+        self.sda = Pin(self._sda_n, Pin.IN, Pin.PULL_UP)
+        self.scl.irq(handler=None)
+        self.sda.irq(handler=None)
+        self.sda.irq(handler=self._on_sda_fall, trigger=Pin.IRQ_FALLING)
+        self.scl.irq(handler=self._on_scl_rise, trigger=Pin.IRQ_RISING)
 
     def irq_disarm(self):
         self.scl.irq(handler=None)
         self.sda.irq(handler=None)
-        self._sda_release()
 
     def irq_wait(self, expect_data=1, timeout_ms=3000):
-        """Wait until STOP or expect_data bytes captured; return (addr, data_list)."""
+        """Wait until addr+expect_data bytes captured; return (addr, data_list)."""
         deadline = time.ticks_add(time.ticks_ms(), timeout_ms)
         while time.ticks_diff(deadline, time.ticks_ms()) > 0:
-            if len(self._data_bytes) >= expect_data and self._acked >= 1 + expect_data:
+            if self._addr_byte is not None and len(self._data_bytes) >= expect_data:
                 break
-            if self._phase == 5 and len(self._data_bytes) >= expect_data:
+            if self._phase == 3 and len(self._data_bytes) >= expect_data:
                 break
             time.sleep_ms(1)
         self.irq_disarm()
@@ -686,20 +649,20 @@ def smoke_i2c_controller(
     target_sda=PIN_I2C_SDA,
     timeout_ms=3000,
 ):
-    """PE I²C controller on PMOD3 → Pico open-drain target on GP10/GP11.
+    """PE I²C controller on PMOD3 → Pico listen-only target on GP10/GP11.
 
     Loads i2c_controller on SM0 (START + addr + ACK sample + data + STOP).
     Each transaction needs two TX pushes: addr_byte then data_byte.
-    Pico ACKs when (addr_byte>>1) matches its 7-bit address.
+    Pico is Pin.IN capture (SPI-slave pattern); firmware does not stall on NACK.
 
-    Kick sequence: prepare_sm → load → configure (no autopush) → TX push
-    pairs → IRQ-arm → enable → collect. Same prepare_sm / double-read /
-    autopush-off lessons as SPI.
+    Pin map: sideset=SCL=uio[1]/P31/GP10, set/out/in=SDA=uio[0]/P34/GP11.
+    Kick: prepare_sm → load → configure (autopush off) → TX push pairs →
+    IRQ-arm → enable → collect. Same prepare_sm / double-read lessons as SPI.
     """
     address7 = (addr_byte >> 1) & 0x7F
     bit_hz = f_clk // (clkdiv_int + 1)
     print("PE I2C controller smoke: SDA=uio[%d] SCL=uio[%d]" % (sda_pin, scl_pin))
-    print("Pico target: SCL=GP%d SDA=GP%d addr7=0x%02x (expect addr_byte=0x%02x)" % (
+    print("Pico target (listen-only): SCL=GP%d SDA=GP%d addr7=0x%02x (expect 0x%02x)" % (
         target_scl, target_sda, address7, addr_byte))
     print("clkdiv_hi=%d (~%d Hz ticks)  push addr=0x%02x data=0x%02x x%d" % (
         clkdiv_int, bit_hz, addr_byte, data_byte, repeat))
@@ -713,6 +676,8 @@ def smoke_i2c_controller(
         return host
 
     target = I2cTargetBitbang(scl=target_scl, sda=target_sda, address=address7)
+    print("idle SCL=%d SDA=%d (expect 1/1 with pull-ups before enable)" % (
+        target.scl.value(), target.sda.value()))
 
     host.prepare_sm(0)
     host.load_program(0, I2C_CONTROLLER_WORDS)
@@ -721,6 +686,13 @@ def smoke_i2c_controller(
         sda_pin=sda_pin,
         scl_pin=scl_pin,
         clkdiv_int=clkdiv_int,
+    )
+    pinctrl = host.read_reg(REG_PINCTRL)
+    pinctrl2 = host.read_reg(REG_PINCTRL2)
+    execctrl = host.read_reg(REG_EXECCTRL)
+    print(
+        "PINCTRL=0x%02x PINCTRL2=0x%02x EXEC=0x%02x (expect 0x21 / 0x01 / 0x80)"
+        % (pinctrl, pinctrl2, execctrl)
     )
     for _ in range(repeat):
         host.tx_push(0, addr_byte)
@@ -735,26 +707,32 @@ def smoke_i2c_controller(
     # Drain ACK samples the firmware pushed (values depend on shift packing)
     host.drain_rx(0, n=4)
 
-    print("target addr_byte=%s data=%s acks=%d matched=%s" % (
-        ("0x%02x" % got_addr) if got_addr is not None else "None",
-        ["0x%02x" % b for b in got_data] if got_data else "(none)",
-        target._acked,
-        target._matched,
-    ))
-    ok = (
-        got_addr == addr_byte
-        and data_byte in got_data
-        and target._matched
-        and target._acked >= 2
+    print(
+        "target addr_byte=%s data=%s matched=%s starts=%d scl_edges=%d"
+        % (
+            ("0x%02x" % got_addr) if got_addr is not None else "None",
+            ["0x%02x" % b for b in got_data] if got_data else "(none)",
+            target._matched,
+            target._starts,
+            target._scl_edges,
+        )
     )
+    ok = got_addr == addr_byte and data_byte in got_data
     if ok:
-        print("PASS: Pico target saw addr 0x%02x data 0x%02x and ACKed" % (
-            addr_byte, data_byte))
+        print("PASS: Pico target saw addr 0x%02x data 0x%02x" % (addr_byte, data_byte))
     else:
         print(
             "FAIL: expected addr 0x%02x data 0x%02x — check P34↔GP11 SDA, "
-            "P31↔GP10 SCL, GND, pull-ups, bitstream" % (addr_byte, data_byte)
+            "P31↔GP10 SCL, GND, pull-ups; re-cp host if OPEN_DRAIN build was on Pico"
+            % (addr_byte, data_byte)
         )
+        if target._starts == 0 and target._scl_edges == 0:
+            print(
+                "hint: no START/SCL IRQs — wiring or PE sideset; green LED on P34 "
+                "should flicker if SDA OE drives low"
+            )
+        elif target._starts == 0:
+            print("hint: SCL edges without START — SDA↓ while SCL high not seen")
     st_after = host.read_reg(REG_STATUS)
     pc = host.read_reg(REG_PC)
     lv = host.read_reg(REG_LEVELS)

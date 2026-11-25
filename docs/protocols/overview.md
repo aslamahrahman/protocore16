@@ -10,7 +10,7 @@ All protocols are **firmware** on ProtoCore16 PEs — not hard macros — so new
 | UART RX 8N1 | `firmware/uart_rx.pca` | Mid-bit sample outline | Assembled; RTL RX bench not yet |
 | SPI master modes 0–3 | `firmware/spi_master.pca` | Mode 0 shown; CPOL/CPHA via SIDE polarity/order | **RTL verified Mode 0** (`tb_spi_master`) |
 | SPI slave | `firmware/spi_slave.pca` | WAIT on SCLK edges | Assembled |
-| I²C controller | `firmware/i2c_controller.pca` | Open-drain via PINDIRS, START/addr/data/STOP | Assembled (≤32 words); **iCESugar Pico smoke** (`smoke_i2c_controller`, Pico = open-drain target) |
+| I²C controller | `firmware/i2c_controller.pca` | Open-drain via PINDIRS, START/addr/data/STOP | Assembled (≤32 words); **iCESugar Pico smoke** (`smoke_i2c_controller`, Pico = listen-only IN+IRQ target) |
 | I²C target | `firmware/i2c_target.pca` | Address compare in Y | Assembled (PE-as-target firmware; board smoke uses Pico target instead) |
 
 ## Stretch goals

@@ -202,7 +202,7 @@ The script:
 - embeds `uart_tx`, `spi_master`, and `i2c_controller` words (`firmware/*.pca` → `build/*.hex`)
 - `smoke_uart_tx` / `smoke_spi_master` / `smoke_i2c_controller` / `debug_spi` entry points
 - PE SPI slave: `SpiSlaveBitbang` IRQ capture on GP10–13 (`machine.SPI` is master-only on RP2 MicroPython)
-- PE I²C target: `I2cTargetBitbang` open-drain ACK on GP10/GP11 (`machine.I2C` is controller-only)
+- PE I²C target: `I2cTargetBitbang` listen-only IN+IRQ on GP10/GP11 (`machine.I2C` is controller-only)
 
 API mirrors [`protocore16.py`](../host/protocore16.py) (`write_reg` / `load_program` / `configure_uart_tx` / `configure_spi_master` / `configure_i2c_controller` / `tx_push`). On-device MicroPython cannot import the CPython module; keep the two in sync when changing the register map.
 
@@ -299,7 +299,9 @@ If STATUS stays `0x00`: check CS pull-up / wiring, common GND, and that the bits
 
 ### 5. PE I²C controller ↔ Pico I²C target
 
-Reuse the SPI MOSI/SCLK jumpers: **P34↔GP11 (SDA)**, **P31↔GP10 (SCL)**, common GND. Host SPI on GP2–5 stays connected. `i2c_controller.pca` does START → addr byte → ACK sample → data byte → STOP; Pico is an open-drain **target** that ACKs when the 7-bit address matches (`addr_byte>>1`, default `0xA0` → `0x50`).
+Reuse the SPI MOSI/SCLK jumpers: **P34↔GP11 (SDA)**, **P31↔GP10 (SCL)**, common GND. Host SPI on GP2–5 stays connected. `i2c_controller.pca` does START → addr byte → ACK sample → data byte → STOP on **SDA=uio[0]**, **SCL=uio[1]** (sideset).
+
+Pico is a **listen-only** target (`Pin.IN` + START/SCL↑ IRQs), same pattern as the SPI slave. Firmware does **not** stall on NACK, so capture of addr+data is enough for PASS. Do **not** use Pico `OPEN_DRAIN` on SDA for this smoke — that hid external START/bit edges (PE still idled at PC=0 with `acks=0`).
 
 ```bash
 mpremote cp docs/solution/host/pico_protocore16.py :pico_protocore16.py
@@ -310,23 +312,26 @@ mpremote exec "import pico_protocore16; pico_protocore16.smoke_i2c_controller()"
 **Expected PASS (REPL):**
 ```
 PE I2C controller smoke: SDA=uio[0] SCL=uio[1]
-Pico target: SCL=GP10 SDA=GP11 addr7=0x50 (expect addr_byte=0xa0)
+Pico target (listen-only): SCL=GP10 SDA=GP11 addr7=0x50 (expect 0xa0)
 clkdiv_hi=255 (~46875 Hz ticks)  push addr=0xa0 data=0x5a x1
 STATUS=0xF0 (expect 0xF0 idle)
-target addr_byte=0xa0 data=['0x5a'] acks=2 matched=True
-PASS: Pico target saw addr 0xa0 data 0x5a and ACKed
+idle SCL=1 SDA=1 (expect 1/1 with pull-ups before enable)
+PINCTRL=0x21 PINCTRL2=0x01 EXEC=0x80 (expect 0x21 / 0x01 / 0x80)
+target addr_byte=0xa0 data=['0x5a'] matched=True starts=1 scl_edges=18
+PASS: Pico target saw addr 0xa0 data 0x5a
 STATUS after: 0xF0  PC=0x00  LEVELS=0x00 (expect ~0xF0/0xF1, PC~0)
 ```
 
 | Check | Expect |
 |-------|--------|
-| REPL | `PASS: Pico target saw addr 0xa0 data 0x5a and ACKed` |
-| Wiring | P34↔GP11 SDA, P31↔GP10 SCL, GND (same as SPI MOSI/SCLK) |
+| REPL | `PASS: Pico target saw addr 0xa0 data 0x5a` |
+| PINCTRL readback | `0x21` / `0x01` / `0x80` (SCL side_base=1, SDA bases=0, side_en) |
+| Wiring | P34↔GP11 SDA, P31↔GP10 SCL, GND (same as SPI MOSI/SCLK — leave those jumpers) |
 | Pull-ups | FPGA `SB_IO` pull-ups present; optional **4.7 kΩ** to 3.3 V on SDA/SCL |
 | Green RGB | may flicker when SDA is driven low on uio[0] |
-| STATUS after | `~0xF0` / `0xF1` — **not** stuck `0x00` |
+| STATUS after | `~0xF0` / `0xF1` — PE completing alone is **not** PASS (needs Pico capture) |
 
-**MicroPython target limits:** `machine.I2C` on RP2040/RP2350 is **controller-only**. This smoke uses `I2cTargetBitbang` with **SCL/SDA edge IRQs on core 0** (not `_thread`). Default `clkdiv_hi=255` (~47 kHz). Do not put the target on GP2–5 (host SPI).
+**MicroPython target limits:** `machine.I2C` on RP2040/RP2350 is **controller-only**. This smoke uses `I2cTargetBitbang` listen-only with **SDA↓ (START) + SCL↑ IRQs on core 0** (not `_thread`, not SDA `OPEN_DRAIN`). Default `clkdiv_hi=255` (~47 kHz). Do not put the target on GP2–5 (host SPI). Re-`cp` the host after pulling this fix so the Pico is not still running the OPEN_DRAIN build.
 
 **Host kick sequence (no reflash):** `prepare_sm` → load `i2c_controller` → `configure_i2c_controller` (**autopush off**; firmware `push`es the ACK sample) → push addr then data → IRQ-arm → enable. **Reflash is not required** — host-only (pin map already on PMOD3 uio[0]/1]).
 
