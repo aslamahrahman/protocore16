@@ -416,12 +416,13 @@ class I2cTargetBitbang:
     """Listen-only I²C capture for PE i2c_controller.pca (MicroPython).
 
     Same pattern as SpiSlaveBitbang: Pin.IN + SCL rising-edge IRQ on core 0.
-    No START/STOP IRQs — SDA↑ during ACK release races with SCL high and was
-    decoded as false STOP (starts=2, addr garbage like 0x1b / 0x5a).
+    No START/STOP IRQs (SDA↑ ACK release races → false STOP / garbage addr).
 
-    i2c_controller.pca after START: first SCL↑ is addr MSB, then 7 more bits,
-    ACK↑, data byte, ACK↑, optional STOP↑. Decode fixed slots (MSB first):
-      bits[0:8]=addr, [8]=ack, [9:17]=data, [17]=ack [,18]=STOP low.
+    i2c_controller.pca SCL↑ timeline (idle SCL high after release_pe_oe):
+      pull side0 → SCL low; set pindirs0 side1 → **preamble SCL↑** (SDA idle);
+      START (SDA↓, SCL stays high); then 8 addr↑, ACK↑, 8 data↑, ACK↑, STOP↑.
+    First sample is preamble, not addr MSB — naive slots yielded addr=0xA0>>1
+    (0x50) and shifted data (0x96). Decode skips preamble and sync-hunts.
     """
 
     def __init__(self, scl=PIN_I2C_SCL, sda=PIN_I2C_SDA, address=0x50):
@@ -440,6 +441,8 @@ class I2cTargetBitbang:
         self._data_bytes = []
         self._matched = False
         self._scl_edges = 0
+        self._sync_skip = None
+        self._ack_gap = None
 
     def _on_scl_rise(self, _pin):
         # Sample SDA exactly like SPI samples MOSI on SCLK rise (MSB first).
@@ -453,25 +456,79 @@ class I2cTargetBitbang:
             acc = ((acc << 1) | (b & 1)) & 0xFF
         return acc
 
-    def _decode(self, expect_data=1):
-        """Decode one or more addr+ack+data+ack frames from raw SCL samples."""
+    def _try_slots(self, skip, ack_gap, expect_data):
+        """addr at raw[skip:skip+8], data bytes after ack_gap clocks each."""
+        raw = self._raw
+        if len(raw) < skip + 8:
+            return None
+        addr = self._byte_from_bits(raw[skip : skip + 8])
+        data = []
+        off = skip + 8 + ack_gap
+        for _ in range(expect_data):
+            if len(raw) < off + 8:
+                return None
+            data.append(self._byte_from_bits(raw[off : off + 8]))
+            off += 8 + ack_gap
+        return addr, data
+
+    def _decode(self, expect_data=1, expect_addr=None, expect_payload=None):
+        """Decode with preamble skip + sync hunt (MSB first).
+
+        Default: skip=1 (PE preamble SCL↑), ack_gap=1. If expect_addr / first
+        data byte are known, search skip in 0..2 and ack_gap in 1..2.
+        """
         self._addr_byte = None
         self._data_bytes = []
         self._matched = False
+        self._sync_skip = None
+        self._ack_gap = None
         raw = self._raw
-        # Need 9 clocks per byte slot (8 data + 1 ACK); STOP may add +1.
-        need = 9 * (1 + expect_data)
-        if len(raw) < need:
+        if len(raw) < 8:
             return
-        addr = self._byte_from_bits(raw[0:8])
-        self._addr_byte = addr
-        self._matched = ((addr >> 1) & 0x7F) == self.address
-        off = 9
-        for _ in range(expect_data):
-            if len(raw) < off + 8:
+
+        candidates = []
+        # Prefer known preamble skip=1, ack_gap=1; also try nearby alignments.
+        for skip in (1, 0, 2):
+            for gap in (1, 2):
+                got = self._try_slots(skip, gap, expect_data)
+                if got is None:
+                    continue
+                addr, data = got
+                candidates.append((skip, gap, addr, data))
+
+        chosen = None
+        if expect_addr is not None:
+            for skip, gap, addr, data in candidates:
+                if addr != expect_addr:
+                    continue
+                if expect_payload is not None:
+                    if not data or data[0] != expect_payload:
+                        continue
+                chosen = (skip, gap, addr, data)
                 break
-            self._data_bytes.append(self._byte_from_bits(raw[off : off + 8]))
-            off += 9
+            # Addr match without payload constraint
+            if chosen is None:
+                for skip, gap, addr, data in candidates:
+                    if addr == expect_addr:
+                        chosen = (skip, gap, addr, data)
+                        break
+        if chosen is None and candidates:
+            # Prefer skip=1,gap=1 (matches pca timeline on clean captures)
+            for skip, gap, addr, data in candidates:
+                if skip == 1 and gap == 1:
+                    chosen = (skip, gap, addr, data)
+                    break
+            if chosen is None:
+                chosen = candidates[0]
+
+        if chosen is None:
+            return
+        skip, gap, addr, data = chosen
+        self._sync_skip = skip
+        self._ack_gap = gap
+        self._addr_byte = addr
+        self._data_bytes = data
+        self._matched = ((addr >> 1) & 0x7F) == self.address
 
     def irq_arm(self):
         self._reset_capture()
@@ -486,16 +543,27 @@ class I2cTargetBitbang:
         self.scl.irq(handler=None)
         self.sda.irq(handler=None)
 
-    def irq_wait(self, expect_data=1, timeout_ms=3000):
-        """Wait for addr+ack+data*expect_data+ack SCL samples; return (addr, data)."""
-        need = 9 * (1 + expect_data)
+    def irq_wait(
+        self,
+        expect_data=1,
+        timeout_ms=3000,
+        expect_addr=None,
+        expect_payload=None,
+    ):
+        """Wait for SCL samples; decode with preamble/sync. Return (addr, data)."""
+        # preamble + 8+ack + n*(8+ack) + STOP ≈ 1 + 9*(1+n) + 1
+        need = 1 + 9 * (1 + expect_data)
         deadline = time.ticks_add(time.ticks_ms(), timeout_ms)
         while time.ticks_diff(deadline, time.ticks_ms()) > 0:
             if len(self._raw) >= need:
                 break
             time.sleep_ms(1)
         self.irq_disarm()
-        self._decode(expect_data=expect_data)
+        self._decode(
+            expect_data=expect_data,
+            expect_addr=expect_addr,
+            expect_payload=expect_payload,
+        )
         return self._addr_byte, list(self._data_bytes)
 
 
@@ -717,10 +785,15 @@ def smoke_i2c_controller(
         host.tx_push(0, addr_byte)
         host.tx_push(0, data_byte)
 
-    # Arm before enable so START / first SCL edges are not missed.
+    # Arm before enable so first SCL↑ (preamble + addr) is not missed.
     target.irq_arm()
     host.enable_sm(0x1)
-    got_addr, got_data = target.irq_wait(expect_data=repeat, timeout_ms=timeout_ms)
+    got_addr, got_data = target.irq_wait(
+        expect_data=repeat,
+        timeout_ms=timeout_ms,
+        expect_addr=addr_byte,
+        expect_payload=data_byte,
+    )
     host.write_reg(REG_CTRL, 0)
 
     # Drain ACK samples the firmware pushed (values depend on shift packing)
@@ -728,12 +801,15 @@ def smoke_i2c_controller(
 
     raw_hex = "".join(str(b) for b in target._raw[:20])
     print(
-        "target addr_byte=%s data=%s matched=%s scl_edges=%d raw[0:18]=%s"
+        "target addr_byte=%s data=%s matched=%s scl_edges=%d "
+        "sync_skip=%s ack_gap=%s raw[0:20]=%s"
         % (
             ("0x%02x" % got_addr) if got_addr is not None else "None",
             ["0x%02x" % b for b in got_data] if got_data else "(none)",
             target._matched,
             target._scl_edges,
+            target._sync_skip,
+            target._ack_gap,
             raw_hex if raw_hex else "(none)",
         )
     )

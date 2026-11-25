@@ -301,7 +301,9 @@ If STATUS stays `0x00`: check CS pull-up / wiring, common GND, and that the bits
 
 Reuse the SPI MOSI/SCLK jumpers: **P34↔GP11 (SDA)**, **P31↔GP10 (SCL)**, common GND. Host SPI on GP2–5 stays connected. `i2c_controller.pca` does START → addr byte → ACK sample → data byte → STOP on **SDA=uio[0]**, **SCL=uio[1]** (sideset).
 
-Pico is a **listen-only** target — **SCL↑ IRQ only** (same as SPI slave MOSI sample). Do **not** use SDA START/STOP IRQs: ACK release (SDA↑) races so SCL is already high → false STOP → garbled addr (`0x5a` / `0x1b`). Firmware does not stall on NACK. Decode fixed slots after START: `bits[0:8]=addr`, `[8]=ack`, `[9:17]=data` (MSB first, matches `shift_right=0`).
+Pico is a **listen-only** target — **SCL↑ IRQ only** (same as SPI slave MOSI sample). Do **not** use SDA START/STOP IRQs. Firmware does not stall on NACK.
+
+**Decode vs `i2c_controller.pca`:** after idle SCL high, `pull side0` then `set pindirs,0 side1` makes a **preamble SCL↑** before START — that sample is *not* addr MSB. Naive `bits[0:8]=addr` yielded `0x50` (`0xa0>>1`) and shifted data (`0x96`). Host skips the preamble and sync-hunts `skip`/`ack_gap` for the expected addr/data (MSB first, `shift_right=0`).
 
 ```bash
 mpremote cp docs/solution/host/pico_protocore16.py :pico_protocore16.py
@@ -317,7 +319,7 @@ clkdiv_hi=255 (~46875 Hz ticks)  push addr=0xa0 data=0x5a x1
 STATUS=0xF0 (expect 0xF0 idle)
 idle SCL=1 SDA=1 (expect 1/1 after release_pe_oe + pull-ups)
 PINCTRL=0x21 PINCTRL2=0x01 EXEC=0x80 (expect 0x21 / 0x01 / 0x80)
-target addr_byte=0xa0 data=['0x5a'] matched=True scl_edges=19 raw[0:18]=101000001010110101
+target addr_byte=0xa0 data=['0x5a'] matched=True scl_edges=20 sync_skip=1 ack_gap=1 raw[0:20]=…
 PASS: Pico target saw addr 0xa0 data 0x5a
 STATUS after: 0xF0  PC=0x00  LEVELS=0x00 (expect ~0xF0/0xF1, PC~0)
 ```
@@ -325,9 +327,9 @@ STATUS after: 0xF0  PC=0x00  LEVELS=0x00 (expect ~0xF0/0xF1, PC~0)
 | Check | Expect |
 |-------|--------|
 | REPL | `PASS: Pico target saw addr 0xa0 data 0x5a` |
+| Sync | `sync_skip=1` (preamble) typical; `ack_gap` 1 or 2 if an extra ACK sample appears |
 | Idle before enable | `SCL=1 SDA=1` after `release_pe_oe` |
 | PINCTRL readback | `0x21` / `0x01` / `0x80` |
-| Raw bits | `10100000` `1` `01011010` … (`0xa0` + ACK + `0x5a`); `scl_edges` ≥ 18 |
 | Wiring | P34↔GP11 SDA, P31↔GP10 SCL, GND (SPI MOSI/SCLK jumpers OK) |
 | Pull-ups | FPGA `SB_IO` pull-ups; optional **4.7 kΩ** to 3.3 V |
 | STATUS after | PE idle alone is **not** PASS — need Pico decode |
