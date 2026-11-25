@@ -315,9 +315,9 @@ PE I2C controller smoke: SDA=uio[0] SCL=uio[1]
 Pico target (listen-only): SCL=GP10 SDA=GP11 addr7=0x50 (expect 0xa0)
 clkdiv_hi=255 (~46875 Hz ticks)  push addr=0xa0 data=0x5a x1
 STATUS=0xF0 (expect 0xF0 idle)
-idle SCL=1 SDA=1 (expect 1/1 with pull-ups before enable)
+idle SCL=1 SDA=1 (expect 1/1 after release_pe_oe + pull-ups)
 PINCTRL=0x21 PINCTRL2=0x01 EXEC=0x80 (expect 0x21 / 0x01 / 0x80)
-target addr_byte=0xa0 data=['0x5a'] matched=True starts=1 scl_edges=18
+target addr_byte=0xa0 data=['0x5a'] matched=True starts=1 ignored=0 stops=1 scl_edges=18
 PASS: Pico target saw addr 0xa0 data 0x5a
 STATUS after: 0xF0  PC=0x00  LEVELS=0x00 (expect ~0xF0/0xF1, PC~0)
 ```
@@ -325,15 +325,17 @@ STATUS after: 0xF0  PC=0x00  LEVELS=0x00 (expect ~0xF0/0xF1, PC~0)
 | Check | Expect |
 |-------|--------|
 | REPL | `PASS: Pico target saw addr 0xa0 data 0x5a` |
+| Idle before enable | `SCL=1 SDA=1` — host calls `release_pe_oe` so leftover SPI/I2C OE does not hold SCL low |
 | PINCTRL readback | `0x21` / `0x01` / `0x80` (SCL side_base=1, SDA bases=0, side_en) |
+| Framing | `starts=1` (not 3); addr `0xa0` then data `0x5a` — mid-frame SDA↓ is **ignored** |
 | Wiring | P34↔GP11 SDA, P31↔GP10 SCL, GND (same as SPI MOSI/SCLK — leave those jumpers) |
 | Pull-ups | FPGA `SB_IO` pull-ups present; optional **4.7 kΩ** to 3.3 V on SDA/SCL |
 | Green RGB | may flicker when SDA is driven low on uio[0] |
 | STATUS after | `~0xF0` / `0xF1` — PE completing alone is **not** PASS (needs Pico capture) |
 
-**MicroPython target limits:** `machine.I2C` on RP2040/RP2350 is **controller-only**. This smoke uses `I2cTargetBitbang` listen-only with **SDA↓ (START) + SCL↑ IRQs on core 0** (not `_thread`, not SDA `OPEN_DRAIN`). Default `clkdiv_hi=255` (~47 kHz). Do not put the target on GP2–5 (host SPI). Re-`cp` the host after pulling this fix so the Pico is not still running the OPEN_DRAIN build.
+**MicroPython target limits:** `machine.I2C` on RP2040/RP2350 is **controller-only**. This smoke uses `I2cTargetBitbang` listen-only with **SDA edge (START/STOP) + SCL↑ IRQs on core 0** (not `_thread`, not SDA `OPEN_DRAIN`). START is accepted only in idle — resetting mid-frame was why `addr_byte=0x5a` / `starts=3` appeared. Default `clkdiv_hi=255` (~47 kHz). Do not put the target on GP2–5 (host SPI). Always re-`cp` after host fixes.
 
-**Host kick sequence (no reflash):** `prepare_sm` → load `i2c_controller` → `configure_i2c_controller` (**autopush off**; firmware `push`es the ACK sample) → push addr then data → IRQ-arm → enable. **Reflash is not required** — host-only (pin map already on PMOD3 uio[0]/1]).
+**Host kick sequence (no reflash):** `prepare_sm` → `release_pe_oe` (clear uio[0:1] OE) → load `i2c_controller` → `configure_i2c_controller` (**autopush off**) → push addr then data → IRQ-arm → enable. **Reflash is not required**.
 
 ---
 

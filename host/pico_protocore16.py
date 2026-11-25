@@ -295,6 +295,29 @@ class ProtoCore16Pico:
         self.write_reg(REG_CTRL, 0)
         self.drain_rx(sm)
 
+    def release_pe_oe(self, sm=0, set_base=0, set_count=2):
+        """Clear gpio_oe on set_base..+set_count so pull-ups can idle high.
+
+        PE OE freezes when SM stops — leftover SPI/I2C sideset often leaves
+        SCL (uio[1]) driven low → idle SCL=0 before the next smoke. SDA=uio[0]
+        and SCL=uio[1] are contiguous; set_base=0,set_count=2 clears both.
+        """
+        self.write_reg(REG_CTRL, 0)
+        self.write_reg(REG_SMSEL, sm)
+        self.write_reg(REG_CLKDIV_LO, 0)
+        self.write_reg(REG_CLKDIV_HI, 0)
+        self.write_reg(REG_EXECCTRL, 0)
+        self.write_reg(
+            REG_PINCTRL,
+            ((set_base & 7) << 2) | (set_count & 3),
+        )
+        self.write_reg(REG_PINCTRL2, 0)
+        # set pindirs, 0 ; jmp 0
+        self.load_program(sm, [0x8060, 0x0000])
+        self.enable_sm(1 << sm)
+        time.sleep_ms(1)
+        self.write_reg(REG_CTRL, 0)
+
 
 class SpiSlaveBitbang:
     """Mode-0 SPI slave (MSB first) — MicroPython machine.SPI is master-only.
@@ -395,12 +418,9 @@ class I2cTargetBitbang:
     machine.I2C is controller-only on RP2 — bitbang + IRQ only. Same lesson as
     SpiSlaveBitbang: Pin.IN + edge IRQ on core 0 (not OPEN_DRAIN, not _thread).
 
-    Why not OPEN_DRAIN ACK on the smoke path: driving/reconfiguring SDA as
-    OPEN_DRAIN made the pad miss external START/bit edges (acks=0 / addr=None
-    while PE still finished — firmware does not stall on NACK). Listen-only is
-    enough: skip the ACK SCL rises in the bit counter, record addr+data.
-
-    START = SDA↓ while SCL high. Sample SDA on each SCL↑ (MSB first).
+    Framing: accept START (SDA↓ while SCL high) only in idle/done — never reset
+    mid-addr/mid-data (false STARTs during ACK/bit edges caused addr=0x5A with
+    starts>1). STOP (SDA↑ while SCL high) returns to idle. Skip ACK SCL rises.
     """
 
     def __init__(self, scl=PIN_I2C_SCL, sda=PIN_I2C_SDA, address=0x50):
@@ -417,23 +437,45 @@ class I2cTargetBitbang:
     def _reset_capture(self):
         self._bits = 0
         self._bitn = 0
-        self._phase = 0  # 0=idle 1=addr 2=data 3=done
+        self._phase = 0  # 0=idle 1=addr 2=data 3=done (pre-STOP)
         self._skip_ack = False
         self._addr_byte = None
         self._data_bytes = []
         self._matched = False
         self._starts = 0
+        self._stops = 0
         self._scl_edges = 0
+        self._starts_ignored = 0
 
     def _on_sda_fall(self, _pin):
-        # START: SDA↓ while SCL high
-        if self.scl.value() == 1:
-            self._bits = 0
-            self._bitn = 0
-            self._phase = 1
+        # START: SDA↓ while SCL high — only when idle/done (not mid-frame)
+        if self.scl.value() != 1:
+            return
+        if self._phase in (1, 2):
+            self._starts_ignored += 1
+            return
+        self._bits = 0
+        self._bitn = 0
+        self._phase = 1
+        self._skip_ack = False
+        self._matched = False
+        self._addr_byte = None
+        self._data_bytes = []
+        self._starts += 1
+
+    def _on_sda_rise(self, _pin):
+        # STOP: SDA↑ while SCL high → idle (allows a later repeated START)
+        if self.scl.value() == 1 and self._phase != 0:
+            self._phase = 0
             self._skip_ack = False
-            self._matched = False
-            self._starts += 1
+            self._bitn = 0
+            self._stops += 1
+
+    def _on_sda_edge(self, pin):
+        if pin.value() == 0:
+            self._on_sda_fall(pin)
+        else:
+            self._on_sda_rise(pin)
 
     def _on_scl_rise(self, _pin):
         if self._phase == 0 or self._phase == 3:
@@ -445,7 +487,7 @@ class I2cTargetBitbang:
             if self._phase == 1:
                 self._phase = 2  # next bits are data
             else:
-                self._phase = 3  # done after data ACK
+                self._phase = 3  # done after data ACK (STOP follows)
             return
         self._bits = ((self._bits << 1) | (self.sda.value() & 1)) & 0xFF
         self._bitn += 1
@@ -468,7 +510,7 @@ class I2cTargetBitbang:
         self.sda = Pin(self._sda_n, Pin.IN, Pin.PULL_UP)
         self.scl.irq(handler=None)
         self.sda.irq(handler=None)
-        self.sda.irq(handler=self._on_sda_fall, trigger=Pin.IRQ_FALLING)
+        self.sda.irq(handler=self._on_sda_edge, trigger=Pin.IRQ_FALLING | Pin.IRQ_RISING)
         self.scl.irq(handler=self._on_scl_rise, trigger=Pin.IRQ_RISING)
 
     def irq_disarm(self):
@@ -675,11 +717,19 @@ def smoke_i2c_controller(
         print("STATUS 0x00 — run debug_spi() before PE I2C smoke")
         return host
 
-    target = I2cTargetBitbang(scl=target_scl, sda=target_sda, address=address7)
-    print("idle SCL=%d SDA=%d (expect 1/1 with pull-ups before enable)" % (
-        target.scl.value(), target.sda.value()))
-
     host.prepare_sm(0)
+    # Drop leftover SPI/I2C OE (often holds SCL low) so pull-ups idle both high.
+    host.release_pe_oe(0, set_base=min(sda_pin, scl_pin), set_count=2)
+
+    target = I2cTargetBitbang(scl=target_scl, sda=target_sda, address=address7)
+    print("idle SCL=%d SDA=%d (expect 1/1 after release_pe_oe + pull-ups)" % (
+        target.scl.value(), target.sda.value()))
+    if target.scl.value() == 0:
+        print(
+            "warn: SCL still low — PE OE may not have cleared, or no pull-up on "
+            "P31↔GP10; add 4.7k to 3.3V if needed"
+        )
+
     host.load_program(0, I2C_CONTROLLER_WORDS)
     host.configure_i2c_controller(
         0,
@@ -708,12 +758,15 @@ def smoke_i2c_controller(
     host.drain_rx(0, n=4)
 
     print(
-        "target addr_byte=%s data=%s matched=%s starts=%d scl_edges=%d"
+        "target addr_byte=%s data=%s matched=%s starts=%d ignored=%d "
+        "stops=%d scl_edges=%d"
         % (
             ("0x%02x" % got_addr) if got_addr is not None else "None",
             ["0x%02x" % b for b in got_data] if got_data else "(none)",
             target._matched,
             target._starts,
+            target._starts_ignored,
+            target._stops,
             target._scl_edges,
         )
     )
@@ -723,7 +776,7 @@ def smoke_i2c_controller(
     else:
         print(
             "FAIL: expected addr 0x%02x data 0x%02x — check P34↔GP11 SDA, "
-            "P31↔GP10 SCL, GND, pull-ups; re-cp host if OPEN_DRAIN build was on Pico"
+            "P31↔GP10 SCL, GND, pull-ups; re-cp host after framing fix"
             % (addr_byte, data_byte)
         )
         if target._starts == 0 and target._scl_edges == 0:
@@ -731,13 +784,18 @@ def smoke_i2c_controller(
                 "hint: no START/SCL IRQs — wiring or PE sideset; green LED on P34 "
                 "should flicker if SDA OE drives low"
             )
-        elif target._starts == 0:
-            print("hint: SCL edges without START — SDA↓ while SCL high not seen")
+        elif got_addr == data_byte and not got_data:
+            print(
+                "hint: data byte seen as addr — mid-frame START reset (old host); "
+                "re-cp listen-only framing fix"
+            )
     st_after = host.read_reg(REG_STATUS)
     pc = host.read_reg(REG_PC)
     lv = host.read_reg(REG_LEVELS)
     print("STATUS after: 0x%02x  PC=0x%02x  LEVELS=0x%02x (expect ~0xF0/0xF1, PC~0)" % (
         st_after, pc, lv))
+    # Leave SDA/SCL released for the next run's idle check
+    host.release_pe_oe(0, set_base=min(sda_pin, scl_pin), set_count=2)
     return host
 
 
