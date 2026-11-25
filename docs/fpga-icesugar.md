@@ -303,7 +303,7 @@ Reuse the SPI MOSI/SCLK jumpers: **P34↔GP11 (SDA)**, **P31↔GP10 (SCL)**, com
 
 Pico is a **listen-only** target — **SCL↑ IRQ only** (same as SPI slave MOSI sample). Do **not** use SDA START/STOP IRQs. Firmware does not stall on NACK.
 
-**Decode vs `i2c_controller.pca`:** after idle SCL high, `pull side0` then `set pindirs,0 side1` makes a **preamble SCL↑** before START — that sample is *not* addr MSB. Naive `bits[0:8]=addr` yielded `0x50` (`0xa0>>1`) and shifted data (`0x96`). Host skips the preamble and sync-hunts `skip`/`ack_gap` for the expected addr/data (MSB first, `shift_right=0`).
+**Decode:** full-stream **MSB-first byte search** for the expected addr then data (ACK gap 1–4). PE preamble / START glitches insert a **variable** leading run (raw like `0000000010101000…` with `0xa0` at bit 8) — fixed `skip∈{0,1,2}` hunts falsely reported `addr=0x01` / `0x50`. No fragile slot table.
 
 ```bash
 mpremote cp docs/solution/host/pico_protocore16.py :pico_protocore16.py
@@ -319,7 +319,7 @@ clkdiv_hi=255 (~46875 Hz ticks)  push addr=0xa0 data=0x5a x1
 STATUS=0xF0 (expect 0xF0 idle)
 idle SCL=1 SDA=1 (expect 1/1 after release_pe_oe + pull-ups)
 PINCTRL=0x21 PINCTRL2=0x01 EXEC=0x80 (expect 0x21 / 0x01 / 0x80)
-target addr_byte=0xa0 data=['0x5a'] matched=True scl_edges=20 sync_skip=1 ack_gap=1 raw[0:20]=…
+target addr_byte=0xa0 data=['0x5a'] matched=True scl_edges=… bit_index=… ack_gap=…
 PASS: Pico target saw addr 0xa0 data 0x5a
 STATUS after: 0xF0  PC=0x00  LEVELS=0x00 (expect ~0xF0/0xF1, PC~0)
 ```
@@ -327,7 +327,7 @@ STATUS after: 0xF0  PC=0x00  LEVELS=0x00 (expect ~0xF0/0xF1, PC~0)
 | Check | Expect |
 |-------|--------|
 | REPL | `PASS: Pico target saw addr 0xa0 data 0x5a` |
-| Sync | `sync_skip=1` (preamble) typical; `ack_gap` 1 or 2 if an extra ACK sample appears |
+| Search | `bit_index` = start of `10100000` in raw; `ack_gap` 1–4 before `01011010` |
 | Idle before enable | `SCL=1 SDA=1` after `release_pe_oe` |
 | PINCTRL readback | `0x21` / `0x01` / `0x80` |
 | Wiring | P34↔GP11 SDA, P31↔GP10 SCL, GND (SPI MOSI/SCLK jumpers OK) |
