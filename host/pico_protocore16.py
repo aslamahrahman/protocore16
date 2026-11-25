@@ -413,21 +413,21 @@ class SpiSlaveBitbang:
 
 
 class I2cTargetBitbang:
-    """Listen-only I²C target capture for PE i2c_controller.pca (MicroPython).
+    """Listen-only I²C capture for PE i2c_controller.pca (MicroPython).
 
-    machine.I2C is controller-only on RP2 — bitbang + IRQ only. Same lesson as
-    SpiSlaveBitbang: Pin.IN + edge IRQ on core 0 (not OPEN_DRAIN, not _thread).
+    Same pattern as SpiSlaveBitbang: Pin.IN + SCL rising-edge IRQ on core 0.
+    No START/STOP IRQs — SDA↑ during ACK release races with SCL high and was
+    decoded as false STOP (starts=2, addr garbage like 0x1b / 0x5a).
 
-    Framing: accept START (SDA↓ while SCL high) only in idle/done — never reset
-    mid-addr/mid-data (false STARTs during ACK/bit edges caused addr=0x5A with
-    starts>1). STOP (SDA↑ while SCL high) returns to idle. Skip ACK SCL rises.
+    i2c_controller.pca after START: first SCL↑ is addr MSB, then 7 more bits,
+    ACK↑, data byte, ACK↑, optional STOP↑. Decode fixed slots (MSB first):
+      bits[0:8]=addr, [8]=ack, [9:17]=data, [17]=ack [,18]=STOP low.
     """
 
     def __init__(self, scl=PIN_I2C_SCL, sda=PIN_I2C_SDA, address=0x50):
         self._scl_n = scl
         self._sda_n = sda
         self.address = address & 0x7F
-        # Kill leftover SPI-slave IRQs / OUT mode on the same GPs, then IN+pull.
         self.scl = Pin(scl, Pin.IN, Pin.PULL_UP)
         self.sda = Pin(sda, Pin.IN, Pin.PULL_UP)
         self.scl.irq(handler=None)
@@ -435,82 +435,51 @@ class I2cTargetBitbang:
         self._reset_capture()
 
     def _reset_capture(self):
-        self._bits = 0
-        self._bitn = 0
-        self._phase = 0  # 0=idle 1=addr 2=data 3=done (pre-STOP)
-        self._skip_ack = False
+        self._raw = []
         self._addr_byte = None
         self._data_bytes = []
         self._matched = False
-        self._starts = 0
-        self._stops = 0
         self._scl_edges = 0
-        self._starts_ignored = 0
-
-    def _on_sda_fall(self, _pin):
-        # START: SDA↓ while SCL high — only when idle/done (not mid-frame)
-        if self.scl.value() != 1:
-            return
-        if self._phase in (1, 2):
-            self._starts_ignored += 1
-            return
-        self._bits = 0
-        self._bitn = 0
-        self._phase = 1
-        self._skip_ack = False
-        self._matched = False
-        self._addr_byte = None
-        self._data_bytes = []
-        self._starts += 1
-
-    def _on_sda_rise(self, _pin):
-        # STOP: SDA↑ while SCL high → idle (allows a later repeated START)
-        if self.scl.value() == 1 and self._phase != 0:
-            self._phase = 0
-            self._skip_ack = False
-            self._bitn = 0
-            self._stops += 1
-
-    def _on_sda_edge(self, pin):
-        if pin.value() == 0:
-            self._on_sda_fall(pin)
-        else:
-            self._on_sda_rise(pin)
 
     def _on_scl_rise(self, _pin):
-        if self._phase == 0 or self._phase == 3:
-            return
+        # Sample SDA exactly like SPI samples MOSI on SCLK rise (MSB first).
+        self._raw.append(self.sda.value() & 1)
         self._scl_edges += 1
-        # ACK slot after every 8 data bits — PE samples, we do not shift
-        if self._skip_ack:
-            self._skip_ack = False
-            if self._phase == 1:
-                self._phase = 2  # next bits are data
-            else:
-                self._phase = 3  # done after data ACK (STOP follows)
+
+    @staticmethod
+    def _byte_from_bits(bits):
+        acc = 0
+        for b in bits:
+            acc = ((acc << 1) | (b & 1)) & 0xFF
+        return acc
+
+    def _decode(self, expect_data=1):
+        """Decode one or more addr+ack+data+ack frames from raw SCL samples."""
+        self._addr_byte = None
+        self._data_bytes = []
+        self._matched = False
+        raw = self._raw
+        # Need 9 clocks per byte slot (8 data + 1 ACK); STOP may add +1.
+        need = 9 * (1 + expect_data)
+        if len(raw) < need:
             return
-        self._bits = ((self._bits << 1) | (self.sda.value() & 1)) & 0xFF
-        self._bitn += 1
-        if self._bitn < 8:
-            return
-        byte = self._bits
-        self._bits = 0
-        self._bitn = 0
-        self._skip_ack = True
-        if self._phase == 1:
-            self._addr_byte = byte
-            self._matched = ((byte >> 1) & 0x7F) == self.address
-        else:
-            self._data_bytes.append(byte)
+        addr = self._byte_from_bits(raw[0:8])
+        self._addr_byte = addr
+        self._matched = ((addr >> 1) & 0x7F) == self.address
+        off = 9
+        for _ in range(expect_data):
+            if len(raw) < off + 8:
+                break
+            self._data_bytes.append(self._byte_from_bits(raw[off : off + 8]))
+            off += 9
 
     def irq_arm(self):
         self._reset_capture()
-        # Re-assert IN (clears any prior OUT/OPEN_DRAIN from older host builds)
         self.scl = Pin(self._scl_n, Pin.IN, Pin.PULL_UP)
         self.sda = Pin(self._sda_n, Pin.IN, Pin.PULL_UP)
-        self.scl.irq(handler=None)
         self.sda.irq(handler=None)
-        self.sda.irq(handler=self._on_sda_edge, trigger=Pin.IRQ_FALLING | Pin.IRQ_RISING)
+        self.scl.irq(handler=None)
+        # SCL only — mirrors smoke_spi_master; no SDA edge IRQs.
         self.scl.irq(handler=self._on_scl_rise, trigger=Pin.IRQ_RISING)
 
     def irq_disarm(self):
@@ -518,15 +487,15 @@ class I2cTargetBitbang:
         self.sda.irq(handler=None)
 
     def irq_wait(self, expect_data=1, timeout_ms=3000):
-        """Wait until addr+expect_data bytes captured; return (addr, data_list)."""
+        """Wait for addr+ack+data*expect_data+ack SCL samples; return (addr, data)."""
+        need = 9 * (1 + expect_data)
         deadline = time.ticks_add(time.ticks_ms(), timeout_ms)
         while time.ticks_diff(deadline, time.ticks_ms()) > 0:
-            if self._addr_byte is not None and len(self._data_bytes) >= expect_data:
-                break
-            if self._phase == 3 and len(self._data_bytes) >= expect_data:
+            if len(self._raw) >= need:
                 break
             time.sleep_ms(1)
         self.irq_disarm()
+        self._decode(expect_data=expect_data)
         return self._addr_byte, list(self._data_bytes)
 
 
@@ -757,17 +726,15 @@ def smoke_i2c_controller(
     # Drain ACK samples the firmware pushed (values depend on shift packing)
     host.drain_rx(0, n=4)
 
+    raw_hex = "".join(str(b) for b in target._raw[:20])
     print(
-        "target addr_byte=%s data=%s matched=%s starts=%d ignored=%d "
-        "stops=%d scl_edges=%d"
+        "target addr_byte=%s data=%s matched=%s scl_edges=%d raw[0:18]=%s"
         % (
             ("0x%02x" % got_addr) if got_addr is not None else "None",
             ["0x%02x" % b for b in got_data] if got_data else "(none)",
             target._matched,
-            target._starts,
-            target._starts_ignored,
-            target._stops,
             target._scl_edges,
+            raw_hex if raw_hex else "(none)",
         )
     )
     ok = got_addr == addr_byte and data_byte in got_data
@@ -776,18 +743,18 @@ def smoke_i2c_controller(
     else:
         print(
             "FAIL: expected addr 0x%02x data 0x%02x — check P34↔GP11 SDA, "
-            "P31↔GP10 SCL, GND, pull-ups; re-cp host after framing fix"
+            "P31↔GP10 SCL, GND, pull-ups; re-cp host (SCL-only decode)"
             % (addr_byte, data_byte)
         )
-        if target._starts == 0 and target._scl_edges == 0:
+        if target._scl_edges == 0:
             print(
-                "hint: no START/SCL IRQs — wiring or PE sideset; green LED on P34 "
+                "hint: no SCL IRQs — wiring or PE sideset; green LED on P34 "
                 "should flicker if SDA OE drives low"
             )
-        elif got_addr == data_byte and not got_data:
+        elif target._scl_edges < 18:
             print(
-                "hint: data byte seen as addr — mid-frame START reset (old host); "
-                "re-cp listen-only framing fix"
+                "hint: short frame (%d SCL↑, need ≥18) — clkdiv/IRQ load"
+                % target._scl_edges
             )
     st_after = host.read_reg(REG_STATUS)
     pc = host.read_reg(REG_PC)

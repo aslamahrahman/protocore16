@@ -301,7 +301,7 @@ If STATUS stays `0x00`: check CS pull-up / wiring, common GND, and that the bits
 
 Reuse the SPI MOSI/SCLK jumpers: **P34↔GP11 (SDA)**, **P31↔GP10 (SCL)**, common GND. Host SPI on GP2–5 stays connected. `i2c_controller.pca` does START → addr byte → ACK sample → data byte → STOP on **SDA=uio[0]**, **SCL=uio[1]** (sideset).
 
-Pico is a **listen-only** target (`Pin.IN` + START/SCL↑ IRQs), same pattern as the SPI slave. Firmware does **not** stall on NACK, so capture of addr+data is enough for PASS. Do **not** use Pico `OPEN_DRAIN` on SDA for this smoke — that hid external START/bit edges (PE still idled at PC=0 with `acks=0`).
+Pico is a **listen-only** target — **SCL↑ IRQ only** (same as SPI slave MOSI sample). Do **not** use SDA START/STOP IRQs: ACK release (SDA↑) races so SCL is already high → false STOP → garbled addr (`0x5a` / `0x1b`). Firmware does not stall on NACK. Decode fixed slots after START: `bits[0:8]=addr`, `[8]=ack`, `[9:17]=data` (MSB first, matches `shift_right=0`).
 
 ```bash
 mpremote cp docs/solution/host/pico_protocore16.py :pico_protocore16.py
@@ -317,7 +317,7 @@ clkdiv_hi=255 (~46875 Hz ticks)  push addr=0xa0 data=0x5a x1
 STATUS=0xF0 (expect 0xF0 idle)
 idle SCL=1 SDA=1 (expect 1/1 after release_pe_oe + pull-ups)
 PINCTRL=0x21 PINCTRL2=0x01 EXEC=0x80 (expect 0x21 / 0x01 / 0x80)
-target addr_byte=0xa0 data=['0x5a'] matched=True starts=1 ignored=0 stops=1 scl_edges=18
+target addr_byte=0xa0 data=['0x5a'] matched=True scl_edges=19 raw[0:18]=101000001010110101
 PASS: Pico target saw addr 0xa0 data 0x5a
 STATUS after: 0xF0  PC=0x00  LEVELS=0x00 (expect ~0xF0/0xF1, PC~0)
 ```
@@ -325,17 +325,16 @@ STATUS after: 0xF0  PC=0x00  LEVELS=0x00 (expect ~0xF0/0xF1, PC~0)
 | Check | Expect |
 |-------|--------|
 | REPL | `PASS: Pico target saw addr 0xa0 data 0x5a` |
-| Idle before enable | `SCL=1 SDA=1` — host calls `release_pe_oe` so leftover SPI/I2C OE does not hold SCL low |
-| PINCTRL readback | `0x21` / `0x01` / `0x80` (SCL side_base=1, SDA bases=0, side_en) |
-| Framing | `starts=1` (not 3); addr `0xa0` then data `0x5a` — mid-frame SDA↓ is **ignored** |
-| Wiring | P34↔GP11 SDA, P31↔GP10 SCL, GND (same as SPI MOSI/SCLK — leave those jumpers) |
-| Pull-ups | FPGA `SB_IO` pull-ups present; optional **4.7 kΩ** to 3.3 V on SDA/SCL |
-| Green RGB | may flicker when SDA is driven low on uio[0] |
-| STATUS after | `~0xF0` / `0xF1` — PE completing alone is **not** PASS (needs Pico capture) |
+| Idle before enable | `SCL=1 SDA=1` after `release_pe_oe` |
+| PINCTRL readback | `0x21` / `0x01` / `0x80` |
+| Raw bits | `10100000` `1` `01011010` … (`0xa0` + ACK + `0x5a`); `scl_edges` ≥ 18 |
+| Wiring | P34↔GP11 SDA, P31↔GP10 SCL, GND (SPI MOSI/SCLK jumpers OK) |
+| Pull-ups | FPGA `SB_IO` pull-ups; optional **4.7 kΩ** to 3.3 V |
+| STATUS after | PE idle alone is **not** PASS — need Pico decode |
 
-**MicroPython target limits:** `machine.I2C` on RP2040/RP2350 is **controller-only**. This smoke uses `I2cTargetBitbang` listen-only with **SDA edge (START/STOP) + SCL↑ IRQs on core 0** (not `_thread`, not SDA `OPEN_DRAIN`). START is accepted only in idle — resetting mid-frame was why `addr_byte=0x5a` / `starts=3` appeared. Default `clkdiv_hi=255` (~47 kHz). Do not put the target on GP2–5 (host SPI). Always re-`cp` after host fixes.
+**MicroPython target limits:** `machine.I2C` is controller-only. Capture = **SCL rising IRQ + sample SDA** (SPI-slave pattern). No SDA edge IRQs. Default `clkdiv_hi=255`. Always re-`cp` after host fixes.
 
-**Host kick sequence (no reflash):** `prepare_sm` → `release_pe_oe` (clear uio[0:1] OE) → load `i2c_controller` → `configure_i2c_controller` (**autopush off**) → push addr then data → IRQ-arm → enable. **Reflash is not required**.
+**Host kick sequence (no reflash):** `prepare_sm` → `release_pe_oe` → load → `configure_i2c_controller` (autopush off) → push addr then data → IRQ-arm → enable.
 
 ---
 
