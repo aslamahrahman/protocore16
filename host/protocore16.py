@@ -13,9 +13,10 @@ Reads need a few idle system clocks between ADDR and DATA so the slave can
 latch reg_rdata into its shift register (see sim/tb_host_spi.v).
 
 Board bring-up (Raspberry Pi Pico MicroPython): see pico_protocore16.py —
-same register helpers / uart_tx smoke, bit-bang SPI on GP2–GP6 → iCESugar PMOD2.
-This module stays CPython/sim-oriented (HostBFM + PyEngine). FT232H is optional
-only; Pico is the documented hardware host path.
+same register helpers / uart_tx / spi_master / i2c_controller smokes, bit-bang
+SPI on GP2–GP6 → iCESugar PMOD2. This module stays CPython/sim-oriented
+(HostBFM + PyEngine). FT232H is optional only; Pico is the documented hardware
+host path.
 """
 
 from __future__ import annotations
@@ -88,6 +89,62 @@ class ProtoCore16Client:
         self.write_reg(REG_PINCTRL, ((tx_pin & 7) << 2) | 1)
         self.write_reg(REG_PINCTRL2, ((tx_pin & 7) << 5) | ((tx_pin & 7) << 2))
         self.write_reg(REG_EXECCTRL, (1 << 5) | (1 << 4))  # autopull, shift_right
+        self.write_reg(REG_SHIFTCTRL, (8 << 4) | 8)
+
+    def configure_spi_master(
+        self: RegBus,
+        sm: int,
+        mosi_pin: int = 0,
+        sclk_pin: int = 1,
+        miso_pin: int = 2,
+        cs_pin: int = 3,
+        clkdiv_int: int = 255,
+    ) -> None:
+        """Mode-0 SPI master bases for firmware/spi_master.pca (MSB first).
+
+        cs_pin lands in set_base for wiring symmetry; spi_master.pca does not
+        toggle CS. EXECCTRL enables sideset (no autopush); shift_right=0.
+        """
+        self.write_reg(REG_SMSEL, sm)
+        self.write_reg(REG_CLKDIV_LO, 0)
+        self.write_reg(REG_CLKDIV_HI, clkdiv_int & 0xFF)
+        self.write_reg(
+            REG_PINCTRL,
+            ((sclk_pin & 7) << 5) | ((cs_pin & 7) << 2) | 1,
+        )
+        self.write_reg(
+            REG_PINCTRL2,
+            ((mosi_pin & 7) << 5) | ((miso_pin & 7) << 2) | 1,
+        )
+        # side_en only — spi_master.pca has explicit push; autopush+push
+        # fills the 4-deep RX FIFO after two bytes and stalls on push-block.
+        self.write_reg(REG_EXECCTRL, (1 << 7))
+        self.write_reg(REG_SHIFTCTRL, (8 << 4) | 8)
+
+    def configure_i2c_controller(
+        self: RegBus,
+        sm: int,
+        sda_pin: int = 0,
+        scl_pin: int = 1,
+        clkdiv_int: int = 255,
+    ) -> None:
+        """I²C controller bases for firmware/i2c_controller.pca (MSB first).
+
+        sideset=SCL; set/out/in=SDA (open-drain via SET PINDIRS). EXECCTRL
+        enables sideset only — no autopush/autopull (firmware pull/push).
+        """
+        self.write_reg(REG_SMSEL, sm)
+        self.write_reg(REG_CLKDIV_LO, 0)
+        self.write_reg(REG_CLKDIV_HI, clkdiv_int & 0xFF)
+        self.write_reg(
+            REG_PINCTRL,
+            ((scl_pin & 7) << 5) | ((sda_pin & 7) << 2) | 1,
+        )
+        self.write_reg(
+            REG_PINCTRL2,
+            ((sda_pin & 7) << 5) | ((sda_pin & 7) << 2) | 1,
+        )
+        self.write_reg(REG_EXECCTRL, (1 << 7))
         self.write_reg(REG_SHIFTCTRL, (8 << 4) | 8)
 
     def enable_sm(self: RegBus, mask: int) -> None:
